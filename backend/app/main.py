@@ -20,14 +20,22 @@ def get_volatility_surface(ticker_symbol: str):
     Endpoint to get the data for the volatility surface plot.
     """
     ticker = options_service.get_ticker_data(ticker_symbol)
+    
+    # Need current price for Greeks calculation
+    try:
+        current_price = ticker.history(period="1d")['Close'].iloc[-1]
+    except:
+        current_price = None
+        
     options_chain = options_service.get_options_chain(ticker)
-    surface_data = calculation_service.prepare_volatility_surface_data(options_chain)
+    surface_data = calculation_service.prepare_volatility_surface_data(options_chain, current_price)
     return surface_data
 
 @app.get("/api/v1/ticker/{ticker_symbol}/open-interest")
 def get_open_interest(ticker_symbol: str):
     """
     Endpoint to get open interest and volume by strike for the nearest expiration.
+    Also returns derived metrics (PCR, Avg IV) for the Market Summary dashboard.
     """
     ticker = options_service.get_ticker_data(ticker_symbol)
     
@@ -39,16 +47,40 @@ def get_open_interest(ticker_symbol: str):
     nearest_expiration = expirations[0]
     options = ticker.option_chain(nearest_expiration)
     
-    calls = options.calls[['strike', 'openInterest', 'volume']].rename(
+    # 1. Create DataFrame for OI Walls
+    calls = options.calls[['strike', 'openInterest', 'volume', 'impliedVolatility']].rename(
         columns={'openInterest': 'callOpenInterest', 'volume': 'callVolume'}
     )
-    puts = options.puts[['strike', 'openInterest', 'volume']].rename(
+    puts = options.puts[['strike', 'openInterest', 'volume', 'impliedVolatility']].rename(
         columns={'openInterest': 'putOpenInterest', 'volume': 'putVolume'}
     )
     
     merged_data = pd.merge(calls, puts, on="strike", how="outer").fillna(0)
     
-    return merged_data.to_dict(orient='records')
+    # 2. Derived Metrics for "Market Summary"
+    total_call_vol = merged_data['callVolume'].sum()
+    total_put_vol = merged_data['putVolume'].sum()
+    
+    pcr = total_put_vol / total_call_vol if total_call_vol > 0 else 0
+    
+    # Calculate Average IV (weighted by volume usually better, but simple mean is fine for now)
+    # We combine both IV columns
+    all_ivs = pd.concat([calls['impliedVolatility'], puts['impliedVolatility']])
+    # Filter out bad data
+    all_ivs = all_ivs[all_ivs > 0]
+    avg_iv = all_ivs.mean() if not all_ivs.empty else 0
+    
+    summary = {
+        "putCallRatio": round(pcr, 2),
+        "averageIV": round(avg_iv, 4),
+        "totalVolume": int(total_call_vol + total_put_vol),
+        "nearestExpiration": nearest_expiration
+    }
+    
+    return {
+        "data": merged_data.to_dict(orient='records'),
+        "summary": summary
+    }
 
 @app.get("/api/v1/ticker/{ticker_symbol}/iv-hv-chart")
 def get_iv_hv_chart(ticker_symbol: str):
