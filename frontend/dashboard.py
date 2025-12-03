@@ -98,7 +98,8 @@ def generate_probability_cone_data(spot_price, current_iv, start_date, days=60):
     return dates_future, upper_1sd, lower_1sd, upper_2sd, lower_2sd
 
 # Config
-API_URL = "http://localhost:8000/api/v1"
+import os
+API_URL = os.getenv("API_URL", "http://localhost:8000/api/v1")
 
 st.set_page_config(page_title="Options Viz", layout="wide")
 st.title("Stock Options Visualization Engine")
@@ -518,36 +519,6 @@ if st.session_state['data']:
             # Convert expiry strings to datetime for parsing
             df_greeks['expiry_date'] = pd.to_datetime(df_greeks['expiry'])
             
-            # --- Unified Overview Chart showing all dates ---
-            st.markdown("---")
-            st.markdown("### Overview: Total Contracts Open")
-            
-            # Calculate total OI per expiration date
-            oi_by_date = df_greeks.groupby('expiry_date').agg({
-                'openInterest': 'sum'
-            }).reset_index()
-            oi_by_date = oi_by_date.sort_values('expiry_date')
-            oi_by_date['date_str'] = oi_by_date['expiry_date'].dt.strftime('%Y-%m-%d')
-            
-            # Create overview bar chart showing all dates
-            fig_overview = go.Figure()
-            fig_overview.add_trace(go.Bar(
-                x=oi_by_date['date_str'],
-                y=oi_by_date['openInterest'],
-                name='Total Open Interest',
-                marker_color='steelblue'
-            ))
-            fig_overview.update_layout(
-                title='Total Contracts Open by Expiration Date',
-                template=chart_template,
-                height=400,
-                xaxis_title='Expiration Date',
-                yaxis_title='Total Open Interest (Contracts)',
-                showlegend=False,
-                xaxis=dict(tickangle=-45)
-            )
-            st.plotly_chart(fig_overview, use_container_width=True)
-            
             # Date range selection
             st.markdown("### Select Date Range for Detailed Analysis")
             
@@ -571,72 +542,7 @@ if st.session_state['data']:
             # Filter df_greeks to selected date range
             df_range = df_greeks[df_greeks['expiry_date'].dt.strftime('%Y-%m-%d').isin(date_range)].copy()
             
-            # --- Liquidity Distribution ---
-            st.markdown("---")
-            if date_range:
-                st.markdown(f"### Liquidity Distribution (Range: {date_range[0]} to {date_range[-1]})")
-            else:
-                st.markdown("### Liquidity Distribution")
-            
-            if not df_range.empty:
-                # Sort dates for proper ordering
-                sorted_dates = sorted(date_range)
-                
-                # Step 1: Create chart showing total OI by expiration date
-                # X-axis: Expiration dates, Y-axis: Total Open Interest
-                # Green bars for calls, red bars for puts
-                
-                total_call_oi = []
-                total_put_oi = []
-                
-                for date_str in sorted_dates:
-                    date_data = df_range[df_range['expiry_date'].dt.strftime('%Y-%m-%d') == date_str]
-                    if not date_data.empty:
-                        call_oi = date_data[date_data['type'] == 'call']['openInterest'].sum()
-                        put_oi = date_data[date_data['type'] == 'put']['openInterest'].sum()
-                        total_call_oi.append(call_oi)
-                        total_put_oi.append(put_oi)
-                    else:
-                        total_call_oi.append(0)
-                        total_put_oi.append(0)
-                
-                # Create bar chart showing total OI per date
-                # Calls above (positive), puts below (negative)
-                fig_total_oi = go.Figure()
-                fig_total_oi.add_trace(go.Bar(
-                    x=sorted_dates,
-                    y=total_call_oi,
-                    name='Call OI',
-                    marker_color='green',
-                    opacity=0.7
-                ))
-                fig_total_oi.add_trace(go.Bar(
-                    x=sorted_dates,
-                    y=[-oi for oi in total_put_oi],  # Negative for below
-                    name='Put OI',
-                    marker_color='red',
-                    opacity=0.7
-                ))
-                fig_total_oi.update_layout(
-                    title='Total Open Interest by Expiration Date',
-                    template=chart_template,
-                    height=400,
-                    xaxis_title='Expiration Date',
-                    yaxis_title='Total Open Interest (Contracts)',
-                    barmode='overlay',
-                    showlegend=True,
-                    xaxis=dict(
-                        type='category',
-                        categoryorder='array',
-                        categoryarray=sorted_dates,
-                        tickangle=-45  # Rotate labels for better visibility
-                    )
-                )
-                st.plotly_chart(fig_total_oi, use_container_width=True)
-            else:
-                st.info("No data available for the selected date range.")
-            
-            # --- Strike-Level Analysis Section (moved here, below violin, above selected date) ---
+            # --- Strike-Level Analysis Section ---
             if date_range and len(date_range) > 0:
                 if len(date_range) == 1:
                     st.markdown(f"### Strike-Level Analysis (Date: {date_range[0]})")
@@ -645,56 +551,136 @@ if st.session_state['data']:
             else:
                 st.markdown("### Strike-Level Analysis")
             
-            # Fetch OI data for the selected date range
-            if 'date_range' in locals() and date_range:
-                selected_exp_oi = date_range[0] if len(date_range) > 0 else None
-                
-                if selected_exp_oi and st.session_state.get('summary') and 'availableExpirations' in st.session_state['summary']:
-                    try:
-                        resp_oi = requests.get(f"{API_URL}/ticker/{ticker}/open-interest", params={"expiration_date": selected_exp_oi})
-                        if resp_oi.status_code == 200:
-                            oi_json = resp_oi.json()
-                            oi_data = pd.DataFrame(oi_json['data'])
-                        else:
-                            oi_data = st.session_state.get('oi_data', pd.DataFrame())
-                    except:
-                        oi_data = st.session_state.get('oi_data', pd.DataFrame())
-                else:
-                    oi_data = st.session_state.get('oi_data', pd.DataFrame())
+            # X-axis toggle for range analysis
+            if not df_range.empty and len(date_range) > 1:
+                x_axis_option = st.radio(
+                    "X-Axis",
+                    ["Strike Price", "Expiration Date"],
+                    horizontal=True,
+                    key="x_axis_range_analysis",
+                    index=0
+                )
             else:
-                oi_data = pd.DataFrame()
+                x_axis_option = "Strike Price"
             
-            if oi_data is not None and not oi_data.empty:
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("**Open Interest by Strike**")
-                    fig_oi = go.Figure()
-                    fig_oi.add_trace(go.Bar(x=oi_data['strike'], y=oi_data['callOpenInterest'], name='Call OI', marker_color='green'))
-                    fig_oi.add_trace(go.Bar(x=oi_data['strike'], y=-oi_data['putOpenInterest'], name='Put OI', marker_color='red'))
-                    fig_oi.update_layout(
-                        barmode='overlay', 
-                        title=f"Open Interest Walls ({selected_exp_oi})", 
-                        template=chart_template, 
-                        height=400, 
-                        xaxis_title='Strike Price ($)',
-                        yaxis_title='Open Interest (Contracts)'
-                    )
-                    st.plotly_chart(fig_oi, use_container_width=True)
+            # Aggregate data based on x-axis selection
+            if not df_range.empty:
+                if x_axis_option == "Strike Price":
+                    # Group by strike, sum across all dates
+                    calls_agg = df_range[df_range['type'] == 'call'].groupby('strike').agg({
+                        'openInterest': 'sum',
+                        'volume': 'sum'
+                    }).reset_index()
+                    puts_agg = df_range[df_range['type'] == 'put'].groupby('strike').agg({
+                        'openInterest': 'sum',
+                        'volume': 'sum'
+                    }).reset_index()
+                    
+                    # Get all strikes
+                    all_x_values = sorted(set(list(calls_agg['strike']) + list(puts_agg['strike'])))
+                    
+                    # Create mapping for quick lookup
+                    calls_oi_dict = dict(zip(calls_agg['strike'], calls_agg['openInterest']))
+                    calls_vol_dict = dict(zip(calls_agg['strike'], calls_agg['volume']))
+                    puts_oi_dict = dict(zip(puts_agg['strike'], puts_agg['openInterest']))
+                    puts_vol_dict = dict(zip(puts_agg['strike'], puts_agg['volume']))
+                    
+                    call_oi_values = [calls_oi_dict.get(x, 0) for x in all_x_values]
+                    put_oi_values = [puts_oi_dict.get(x, 0) for x in all_x_values]
+                    call_vol_values = [calls_vol_dict.get(x, 0) for x in all_x_values]
+                    put_vol_values = [puts_vol_dict.get(x, 0) for x in all_x_values]
+                    
+                    x_axis_title = 'Strike Price ($)'
+                else:  # Expiration Date
+                    # Group by expiration date, sum across all strikes
+                    calls_agg = df_range[df_range['type'] == 'call'].groupby('expiry_date').agg({
+                        'openInterest': 'sum',
+                        'volume': 'sum'
+                    }).reset_index()
+                    puts_agg = df_range[df_range['type'] == 'put'].groupby('expiry_date').agg({
+                        'openInterest': 'sum',
+                        'volume': 'sum'
+                    }).reset_index()
+                    
+                    # Get all expiration dates
+                    all_x_values = sorted(set(list(calls_agg['expiry_date']) + list(puts_agg['expiry_date'])))
+                    
+                    # Create mapping for quick lookup
+                    calls_oi_dict = dict(zip(calls_agg['expiry_date'], calls_agg['openInterest']))
+                    calls_vol_dict = dict(zip(calls_agg['expiry_date'], calls_agg['volume']))
+                    puts_oi_dict = dict(zip(puts_agg['expiry_date'], puts_agg['openInterest']))
+                    puts_vol_dict = dict(zip(puts_agg['expiry_date'], puts_agg['volume']))
+                    
+                    call_oi_values = [calls_oi_dict.get(x, 0) for x in all_x_values]
+                    put_oi_values = [puts_oi_dict.get(x, 0) for x in all_x_values]
+                    call_vol_values = [calls_vol_dict.get(x, 0) for x in all_x_values]
+                    put_vol_values = [puts_vol_dict.get(x, 0) for x in all_x_values]
+                    
+                    x_axis_title = 'Expiration Date'
+                    # Convert dates to strings for display
+                    all_x_values = [x.strftime('%Y-%m-%d') if hasattr(x, 'strftime') else str(x) for x in all_x_values]
                 
-                with col2:
-                    st.markdown("**Volume by Strike**")
-                    fig_vol = go.Figure()
-                    fig_vol.add_trace(go.Bar(x=oi_data['strike'], y=oi_data.get('callVolume', [0]*len(oi_data)), name='Call Volume', marker_color='lightgreen'))
-                    fig_vol.add_trace(go.Bar(x=oi_data['strike'], y=-oi_data.get('putVolume', [0]*len(oi_data)), name='Put Volume', marker_color='lightcoral'))
-                    fig_vol.update_layout(
-                        barmode='overlay', 
-                        title=f"Volume ({selected_exp_oi})", 
-                        template=chart_template, 
-                        height=400,
-                        xaxis_title='Strike Price ($)',
-                        yaxis_title='Volume (Contracts)'
-                    )
-                    st.plotly_chart(fig_vol, use_container_width=True)
+                # Open Interest Chart (full width)
+                st.markdown("**Open Interest**")
+                fig_oi = go.Figure()
+                fig_oi.add_trace(go.Bar(
+                    x=all_x_values,
+                    y=call_oi_values,
+                    name='Call OI',
+                    marker_color='green',
+                    opacity=0.7
+                ))
+                fig_oi.add_trace(go.Bar(
+                    x=all_x_values,
+                    y=[-oi for oi in put_oi_values],  # Negative for below
+                    name='Put OI',
+                    marker_color='red',
+                    opacity=0.7
+                ))
+                fig_oi.update_layout(
+                    barmode='overlay',
+                    title=f"Open Interest by {x_axis_option}",
+                    template=chart_template,
+                    height=400,
+                    xaxis_title=x_axis_title,
+                    yaxis_title='Open Interest (Contracts)',
+                    showlegend=True,
+                    hovermode='x unified'
+                )
+                if x_axis_option == "Expiration Date":
+                    fig_oi.update_layout(xaxis=dict(tickangle=-45))
+                st.plotly_chart(fig_oi, use_container_width=True)
+                
+                # Volume Chart (full width)
+                st.markdown("**Volume**")
+                fig_vol = go.Figure()
+                fig_vol.add_trace(go.Bar(
+                    x=all_x_values,
+                    y=call_vol_values,
+                    name='Call Volume',
+                    marker_color='lightgreen',
+                    opacity=0.7
+                ))
+                fig_vol.add_trace(go.Bar(
+                    x=all_x_values,
+                    y=[-vol for vol in put_vol_values],  # Negative for below
+                    name='Put Volume',
+                    marker_color='lightcoral',
+                    opacity=0.7
+                ))
+                fig_vol.update_layout(
+                    barmode='overlay',
+                    title=f"Volume by {x_axis_option}",
+                    template=chart_template,
+                    height=400,
+                    xaxis_title=x_axis_title,
+                    yaxis_title='Volume (Contracts)',
+                    showlegend=True,
+                    hovermode='x unified'
+                )
+                if x_axis_option == "Expiration Date":
+                    fig_vol.update_layout(xaxis=dict(tickangle=-45))
+                st.plotly_chart(fig_vol, use_container_width=True)
             
             # --- Selected Date Drill-Down Section ---
             if not df_range.empty:
