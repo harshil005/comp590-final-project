@@ -99,9 +99,15 @@ def generate_probability_cone_data(spot_price, current_iv, start_date, days=60):
 
 # Config
 import os
+import sys
+
+# Set page config first - this must be the first Streamlit command
+st.set_page_config(page_title="Options Viz", layout="wide")
+
+# Get API URL
 API_URL = os.getenv("API_URL", "http://localhost:8000/api/v1")
 
-st.set_page_config(page_title="Options Viz", layout="wide")
+# Display title immediately
 st.title("Stock Options Visualization Engine")
 
 # --- CSS for Production Polish (Dark Mode & Alignment) ---
@@ -339,8 +345,9 @@ if st.session_state['data']:
                 
                 fig_map = go.Figure()
 
-                # Add historical data trace
-                fig_map.add_trace(go.Scatter(x=hist_df['date'], y=hist_df['price'], mode='lines', name='Historical Price', line=dict(color='white', width=2)))
+                # Add historical data trace with theme-aware color
+                price_line_color = '#FFFFFF' if st.session_state["dark_mode"] else '#1f77b4'  # White for dark mode, blue for light mode
+                fig_map.add_trace(go.Scatter(x=hist_df['date'], y=hist_df['price'], mode='lines', name='Historical Price', line=dict(color=price_line_color, width=2)))
 
                 # Add Support and Resistance Lines
                 if call_wall is not None:
