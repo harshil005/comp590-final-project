@@ -1,43 +1,80 @@
-import streamlit as st
-import requests
+# built-in
+import os
+import sys
+from datetime import datetime, timedelta
+from typing import Optional, Tuple
+
+# external
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import numpy as np
-from datetime import datetime, timedelta
+import requests
+import streamlit as st
 from scipy.stats import norm
 
+# internal
+
+# Color constants - base colors that work in both themes
+CALL_COLOR_LIGHT = '#2E7D32'  # Darker green for light mode visibility
+CALL_COLOR_DARK = '#4CAF50'   # Brighter green for dark mode visibility
+PUT_COLOR_LIGHT = '#C62828'   # Darker red for light mode visibility
+PUT_COLOR_DARK = '#EF5350'   # Brighter red for dark mode visibility
+
 # --- HELPER FUNCTIONS ---
-def calculate_gex_profile(df_greeks, spot_price):
+def calculate_gex_profile(df_greeks: pd.DataFrame, spot_price: float) -> pd.DataFrame:
     """
     Calculates Gamma Exposure (GEX) Profile per strike.
-    GEX = Gamma * Open Interest * 100 * Spot^2 * 0.01
-    Direction: Call GEX is positive, Put GEX is negative.
+    
+    GEX measures the notional dollar exposure that market makers must hedge
+    as the underlying price moves. This creates support/resistance levels
+    because dealers buy on dips (positive GEX) and sell on rallies (negative GEX).
+    
+    The calculation uses: GEX = Gamma * Open Interest * 100 * Spot^2 * 0.01
+    where 0.01 normalizes for a 1% move, and 100 is the contract multiplier.
+    
+    Args:
+        df_greeks: DataFrame containing Greeks data with columns: type, gamma, openInterest, strike
+        spot_price: Current spot price of the underlying asset
+        
+    Returns:
+        DataFrame with columns: strike, gex (aggregated GEX per strike)
     """
     if df_greeks.empty or spot_price is None:
         return pd.DataFrame()
         
-    # Ensure numeric types
+    # Coerce to numeric to handle any string or mixed-type columns from API
     df = df_greeks.copy()
     df['gamma'] = pd.to_numeric(df['gamma'], errors='coerce').fillna(0)
     df['openInterest'] = pd.to_numeric(df['openInterest'], errors='coerce').fillna(0)
     
-    # Calculate Notional GEX per contract
-    # Factor 0.01 is to normalize for 1% move
+    # Normalize GEX calculation for a 1% move to make values comparable across strikes
+    # The spot_price^2 term accounts for the non-linear relationship between price and gamma
     const_factor = 100 * (spot_price**2) * 0.01
     
-    # Call GEX (Positive)
+    # Calls create positive GEX (dealers buy stock to hedge, creating support)
     df.loc[df['type'] == 'call', 'gex'] = df['gamma'] * df['openInterest'] * const_factor
     
-    # Put GEX (Negative)
+    # Puts create negative GEX (dealers sell stock to hedge, creating resistance)
     df.loc[df['type'] == 'put', 'gex'] = df['gamma'] * df['openInterest'] * const_factor * -1
     
-    # Aggregate by strike
+    # Aggregate by strike to find net GEX at each price level
     gex_profile = df.groupby('strike')['gex'].sum().reset_index()
     return gex_profile
 
-def calculate_zero_gamma(df_greeks, current_spot):
+def calculate_zero_gamma(df_greeks: pd.DataFrame, current_spot: float) -> Optional[float]:
     """
-    Estimates the Zero Gamma Flip Level by simulating spot price moves.
+    Estimates the Zero Gamma Flip Level by finding where cumulative GEX crosses zero.
+    
+    The zero gamma level is critical because it's where market maker hedging behavior
+    flips from buying (support) to selling (resistance) or vice versa. This creates
+    a significant price level that often acts as a magnet or pivot point.
+    
+    Args:
+        df_greeks: DataFrame containing Greeks data
+        current_spot: Current spot price of the underlying asset
+        
+    Returns:
+        Estimated zero gamma price level, or None if cannot be determined
     """
     if df_greeks.empty or current_spot is None:
         return None
@@ -46,49 +83,67 @@ def calculate_zero_gamma(df_greeks, current_spot):
     if gex_profile.empty:
         return None
         
-    # Sort by strike
+    # Sort by strike to enable cumulative calculation
     gex_profile = gex_profile.sort_values('strike')
     
-    # Calculate cumulative sum
+    # Cumulative GEX shows net hedging pressure as price moves up
+    # When this crosses zero, dealer behavior flips
     gex_profile['cum_gex'] = gex_profile['gex'].cumsum()
     
-    # Find where sign flips from positive to negative or vice versa
-    # Iterate to find crossing
+    # Find the strike where cumulative GEX crosses zero
+    # This indicates where market maker hedging switches from buying to selling
     flip_price = None
     for i in range(1, len(gex_profile)):
         prev_gex = gex_profile.iloc[i-1]['cum_gex']
         curr_gex = gex_profile.iloc[i]['cum_gex']
         
+        # Detect sign change indicating zero crossing
         if (prev_gex > 0 and curr_gex < 0) or (prev_gex < 0 and curr_gex > 0):
-            # Linear interpolation for the crossing strike
+            # Interpolate between strikes to find approximate zero level
             strike_prev = gex_profile.iloc[i-1]['strike']
             strike_curr = gex_profile.iloc[i]['strike']
             
-            # Simple average for now
+            # Simple linear interpolation (could be improved with weighted average)
             flip_price = (strike_prev + strike_curr) / 2
             break
             
     return flip_price
 
-def generate_probability_cone_data(spot_price, current_iv, start_date, days=60):
+def generate_probability_cone_data(spot_price: float, current_iv: float, start_date: datetime, days: int = 60) -> Tuple[list, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Generates data for Probability Cone (1SD and 2SD), starting from a specific date.
+    Generates probability cone data showing expected price range based on implied volatility.
+    
+    The cone uses the Black-Scholes assumption that price movements follow a log-normal
+    distribution. The 1SD and 2SD bands represent 68% and 95% probability ranges respectively.
+    This helps traders visualize where the stock is likely to trade over time.
+    
+    Args:
+        spot_price: Current spot price to anchor the cone
+        current_iv: Current implied volatility (annualized)
+        start_date: Starting date for the cone projection
+        days: Number of days to project forward (default 60)
+        
+    Returns:
+        Tuple of (dates, upper_1sd, lower_1sd, upper_2sd, lower_2sd) arrays
     """
     days_future = np.arange(1, days)
     
-    # Anchor the start of the cone to the last known price
+    # Anchor cone to current price to show forward projection from known point
     cone_anchor_price = spot_price
 
+    # Calculate 1 standard deviation bands (68% probability range)
+    # Volatility scales with square root of time (annualized IV converted to daily)
     upper_1sd = cone_anchor_price * (1 + current_iv * np.sqrt(days_future/365))
     lower_1sd = cone_anchor_price * (1 - current_iv * np.sqrt(days_future/365))
     
+    # Calculate 2 standard deviation bands (95% probability range)
     upper_2sd = cone_anchor_price * (1 + 2 * current_iv * np.sqrt(days_future/365))
     lower_2sd = cone_anchor_price * (1 - 2 * current_iv * np.sqrt(days_future/365))
     
-    # Start dates from the day after the last historical date
+    # Generate future dates starting from the day after the anchor date
     dates_future = [start_date + timedelta(days=int(d)) for d in days_future]
     
-    # Prepend the anchor point to the cone data arrays to ensure visual connection
+    # Prepend anchor point to ensure visual continuity with historical price chart
     dates_future.insert(0, start_date)
     upper_1sd = np.insert(upper_1sd, 0, cone_anchor_price)
     lower_1sd = np.insert(lower_1sd, 0, cone_anchor_price)
@@ -96,10 +151,6 @@ def generate_probability_cone_data(spot_price, current_iv, start_date, days=60):
     lower_2sd = np.insert(lower_2sd, 0, cone_anchor_price)
 
     return dates_future, upper_1sd, lower_1sd, upper_2sd, lower_2sd
-
-# Config
-import os
-import sys
 
 # Set page config first - this must be the first Streamlit command
 st.set_page_config(page_title="Options Viz", layout="wide")
@@ -262,7 +313,8 @@ if analyze_btn:
             # Fetch Historical Price Data
             resp_hist = requests.get(f"{API_URL}/ticker/{ticker}/historical-price")
             if resp_hist.status_code == 200:
-                st.session_state['historical_price'] = pd.DataFrame(resp_hist.json())
+                hist_json = resp_hist.json()
+                st.session_state['historical_price'] = pd.DataFrame(hist_json.get('data', hist_json))
                 
         except Exception as e:
             st.error(f"Error connecting to backend: {e}")
@@ -270,7 +322,17 @@ if analyze_btn:
 # --- MAIN CONTENT ---
 if st.session_state['data']:
     data = st.session_state['data']
-    chart_template = "plotly_dark" if st.session_state["dark_mode"] else "plotly"
+    is_dark_mode = st.session_state["dark_mode"]
+    chart_template = "plotly_dark" if is_dark_mode else "plotly"
+    
+    # Theme-aware colors for better visibility in both modes
+    call_color = CALL_COLOR_DARK if is_dark_mode else CALL_COLOR_LIGHT
+    put_color = PUT_COLOR_DARK if is_dark_mode else PUT_COLOR_LIGHT
+    
+    # Chart background colors - explicitly set to ensure dark mode works
+    plot_bg_color = 'rgba(0,0,0,0)' if is_dark_mode else 'rgba(255,255,255,0)'
+    paper_bg_color = 'rgba(0,0,0,0)' if is_dark_mode else 'rgba(255,255,255,0)'
+    font_color = 'rgba(255,255,255,1)' if is_dark_mode else 'rgba(0,0,0,1)'
     
     # --- MAIN DASHBOARD ---
     # --- Top Row Metrics: Comparative Market Pulse ---
@@ -345,17 +407,25 @@ if st.session_state['data']:
                 
                 fig_map = go.Figure()
 
-                # Add historical data trace with theme-aware color
-                price_line_color = '#FFFFFF' if st.session_state["dark_mode"] else '#1f77b4'  # White for dark mode, blue for light mode
+                # Price line color adapts to theme for visibility
+                price_line_color = '#FFFFFF' if is_dark_mode else '#1f77b4'
                 fig_map.add_trace(go.Scatter(x=hist_df['date'], y=hist_df['price'], mode='lines', name='Historical Price', line=dict(color=price_line_color, width=2)))
 
-                # Add Support and Resistance Lines
+                # Support and resistance lines use theme-aware colors
                 if call_wall is not None:
-                    fig_map.add_hline(y=call_wall, line_dash="dot", line_color="red", annotation_text=f"Resistance (Call Wall): ${call_wall:,.0f}")
+                    fig_map.add_hline(y=call_wall, line_dash="dot", line_color=put_color, annotation_text=f"Resistance (Call Wall): ${call_wall:,.0f}")
                 if put_wall is not None:
-                    fig_map.add_hline(y=put_wall, line_dash="dot", line_color="green", annotation_text=f"Support (Put Wall): ${put_wall:,.0f}")
+                    fig_map.add_hline(y=put_wall, line_dash="dot", line_color=call_color, annotation_text=f"Support (Put Wall): ${put_wall:,.0f}")
                 
-                fig_map.update_layout(title="Historical Price vs. Options-Derived Support & Resistance", template=chart_template, hovermode="x unified", height=500)
+                fig_map.update_layout(
+                    title="Historical Price vs. Options-Derived Support & Resistance",
+                    template=chart_template,
+                    hovermode="x unified",
+                    height=500,
+                    plot_bgcolor=plot_bg_color,
+                    paper_bgcolor=paper_bg_color,
+                    font=dict(color=font_color)
+                )
                 st.plotly_chart(fig_map, use_container_width=True)
     
     # --- Volatility Analysis Section ---
@@ -393,7 +463,23 @@ if st.session_state['data']:
             if "mesh_z" in data and data["mesh_z"]:
                 st.markdown("**3D Volatility Surface**")
                 fig_surf = go.Figure(data=[go.Surface(z=data['mesh_z'], x=data['mesh_x'], y=data['mesh_y'], colorscale='Reds', cmin=0, opacity=0.9, colorbar=dict(title='IV'), lighting=dict(ambient=0.5, diffuse=0.5))])
-                fig_surf.update_layout(title='3D Volatility Surface: Find Cheap Options in Valleys', template=chart_template, height=600, scene=dict(xaxis_title='Strike', yaxis_title='Days to Expiry', zaxis_title='IV'))
+                fig_surf.update_layout(
+                    title='3D Volatility Surface: Find Cheap Options in Valleys',
+                    template=chart_template,
+                    height=600,
+                    plot_bgcolor=plot_bg_color,
+                    paper_bgcolor=paper_bg_color,
+                    font=dict(color=font_color),
+                    scene=dict(
+                        xaxis_title='Strike',
+                        yaxis_title='Days to Expiry',
+                        zaxis_title='IV',
+                        bgcolor=plot_bg_color,
+                        xaxis=dict(gridcolor='rgba(128,128,128,0.2)' if is_dark_mode else 'rgba(128,128,128,0.1)'),
+                        yaxis=dict(gridcolor='rgba(128,128,128,0.2)' if is_dark_mode else 'rgba(128,128,128,0.1)'),
+                        zaxis=dict(gridcolor='rgba(128,128,128,0.2)' if is_dark_mode else 'rgba(128,128,128,0.1)')
+                    )
+                )
                 st.plotly_chart(fig_surf, use_container_width=True)
             
             # Expiration range selector for 2D heatmap
@@ -456,7 +542,10 @@ if st.session_state['data']:
                         template=chart_template,
                         height=600,
                         yaxis_title='Strike Price',
-                        xaxis_title='Expiration Date'
+                        xaxis_title='Expiration Date',
+                        plot_bgcolor=plot_bg_color,
+                        paper_bgcolor=paper_bg_color,
+                        font=dict(color=font_color)
                     )
                     st.plotly_chart(fig_heatmap_calls, use_container_width=True)
                 
@@ -477,7 +566,10 @@ if st.session_state['data']:
                         template=chart_template,
                         height=600,
                         yaxis_title='Strike Price',
-                        xaxis_title='Expiration Date'
+                        xaxis_title='Expiration Date',
+                        plot_bgcolor=plot_bg_color,
+                        paper_bgcolor=paper_bg_color,
+                        font=dict(color=font_color)
                     )
                     st.plotly_chart(fig_heatmap_puts, use_container_width=True)
     
@@ -634,14 +726,14 @@ if st.session_state['data']:
                     x=all_x_values,
                     y=call_oi_values,
                     name='Call OI',
-                    marker_color='green',
+                    marker_color=call_color,
                     opacity=0.7
                 ))
                 fig_oi.add_trace(go.Bar(
                     x=all_x_values,
                     y=[-oi for oi in put_oi_values],  # Negative for below
                     name='Put OI',
-                    marker_color='red',
+                    marker_color=put_color,
                     opacity=0.7
                 ))
                 fig_oi.update_layout(
@@ -652,7 +744,10 @@ if st.session_state['data']:
                     xaxis_title=x_axis_title,
                     yaxis_title='Open Interest (Contracts)',
                     showlegend=True,
-                    hovermode='x unified'
+                    hovermode='x unified',
+                    plot_bgcolor=plot_bg_color,
+                    paper_bgcolor=paper_bg_color,
+                    font=dict(color=font_color)
                 )
                 if x_axis_option == "Expiration Date":
                     fig_oi.update_layout(xaxis=dict(tickangle=-45))
@@ -665,14 +760,14 @@ if st.session_state['data']:
                     x=all_x_values,
                     y=call_vol_values,
                     name='Call Volume',
-                    marker_color='lightgreen',
+                    marker_color=call_color,
                     opacity=0.7
                 ))
                 fig_vol.add_trace(go.Bar(
                     x=all_x_values,
                     y=[-vol for vol in put_vol_values],  # Negative for below
                     name='Put Volume',
-                    marker_color='lightcoral',
+                    marker_color=put_color,
                     opacity=0.7
                 ))
                 fig_vol.update_layout(
@@ -683,7 +778,10 @@ if st.session_state['data']:
                     xaxis_title=x_axis_title,
                     yaxis_title='Volume (Contracts)',
                     showlegend=True,
-                    hovermode='x unified'
+                    hovermode='x unified',
+                    plot_bgcolor=plot_bg_color,
+                    paper_bgcolor=paper_bg_color,
+                    font=dict(color=font_color)
                 )
                 if x_axis_option == "Expiration Date":
                     fig_vol.update_layout(xaxis=dict(tickangle=-45))
@@ -732,14 +830,14 @@ if st.session_state['data']:
                             x=all_strikes,
                             y=call_oi_values,
                             name='Call OI',
-                            marker_color='green',
+                            marker_color=call_color,
                             opacity=0.7
                         ))
                         fig_oi_by_strike.add_trace(go.Bar(
                             x=all_strikes,
                             y=[-oi for oi in put_oi_values],  # Negative for below
                             name='Put OI',
-                            marker_color='red',
+                            marker_color=put_color,
                             opacity=0.7
                         ))
                         fig_oi_by_strike.update_layout(
@@ -750,7 +848,10 @@ if st.session_state['data']:
                             yaxis_title='Open Interest (Contracts)',
                             barmode='overlay',
                             showlegend=True,
-                            hovermode='x unified'
+                            hovermode='x unified',
+                            plot_bgcolor=plot_bg_color,
+                            paper_bgcolor=paper_bg_color,
+                            font=dict(color=font_color)
                         )
                         st.plotly_chart(fig_oi_by_strike, use_container_width=True)
                     
@@ -761,14 +862,14 @@ if st.session_state['data']:
                             x=all_strikes,
                             y=call_vol_values,
                             name='Call Volume',
-                            marker_color='lightgreen',
+                            marker_color=call_color,
                             opacity=0.7
                         ))
                         fig_vol_by_strike.add_trace(go.Bar(
                             x=all_strikes,
                             y=[-vol for vol in put_vol_values],  # Negative for below
                             name='Put Volume',
-                            marker_color='lightcoral',
+                            marker_color=put_color,
                             opacity=0.7
                         ))
                         fig_vol_by_strike.update_layout(
@@ -779,7 +880,10 @@ if st.session_state['data']:
                             yaxis_title='Volume (Contracts)',
                             barmode='overlay',
                             showlegend=True,
-                            hovermode='x unified'
+                            hovermode='x unified',
+                            plot_bgcolor=plot_bg_color,
+                            paper_bgcolor=paper_bg_color,
+                            font=dict(color=font_color)
                         )
                         st.plotly_chart(fig_vol_by_strike, use_container_width=True)
                     
@@ -819,7 +923,10 @@ if st.session_state['data']:
                                 template=chart_template,
                                 height=350,
                                 xaxis_title='Strike Price ($)',
-                                yaxis_title='Delta'
+                                yaxis_title='Delta',
+                                plot_bgcolor=plot_bg_color,
+                                paper_bgcolor=paper_bg_color,
+                                font=dict(color=font_color)
                             )
                             st.plotly_chart(fig_delta, use_container_width=True)
                         with col_g2:
@@ -829,7 +936,10 @@ if st.session_state['data']:
                                 template=chart_template,
                                 height=350,
                                 xaxis_title='Strike Price ($)',
-                                yaxis_title='Gamma'
+                                yaxis_title='Gamma',
+                                plot_bgcolor=plot_bg_color,
+                                paper_bgcolor=paper_bg_color,
+                                font=dict(color=font_color)
                             )
                             st.plotly_chart(fig_gamma, use_container_width=True)
                         with col_g3:
@@ -839,7 +949,10 @@ if st.session_state['data']:
                                 template=chart_template,
                                 height=350,
                                 xaxis_title='Strike Price ($)',
-                                yaxis_title='Theta'
+                                yaxis_title='Theta',
+                                plot_bgcolor=plot_bg_color,
+                                paper_bgcolor=paper_bg_color,
+                                font=dict(color=font_color)
                             )
                             st.plotly_chart(fig_theta, use_container_width=True)
 

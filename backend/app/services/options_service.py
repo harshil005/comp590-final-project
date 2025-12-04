@@ -1,37 +1,71 @@
-import yfinance as yf
+# external
 import pandas as pd
+import yfinance as yf
 
-def get_ticker_data(ticker_symbol: str):
+# internal
+
+
+def get_ticker_data(ticker_symbol: str) -> yf.Ticker:
     """
-    Fetches the ticker object from yfinance.
+    Creates a yfinance Ticker object for the given symbol.
+    
+    This is a lightweight operation that doesn't fetch data immediately.
+    The ticker object is used later to fetch options chains and historical data
+    on-demand, which is more efficient than pre-loading all data.
+    
+    Args:
+        ticker_symbol: Stock ticker symbol (e.g., 'SPY', 'AAPL')
+        
+    Returns:
+        yf.Ticker object ready for data fetching operations
     """
     ticker = yf.Ticker(ticker_symbol)
     return ticker
 
 def clean_options_data(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Cleans the options dataframe by removing invalid contracts.
-    - Removes contracts with bid == 0 (no liquidity)
-    - Ensures impliedVolatility is valid
+    Removes invalid option contracts that would cause calculation errors.
+    
+    Filters out contracts with zero bid (no liquidity) and invalid implied volatility
+    values. These often appear in yfinance data for illiquid strikes and would
+    produce incorrect Greeks calculations or visualization artifacts.
+    
+    Args:
+        df: Raw options DataFrame from yfinance
+        
+    Returns:
+        Cleaned DataFrame with only valid, tradeable contracts
     """
     if df.empty:
         return df
         
-    # Filter out contracts with no market (Bid == 0)
+    # Zero bid indicates no market maker willing to buy - contract is effectively dead
     if 'bid' in df.columns:
         df = df[df['bid'] > 0]
         
-    # Filter out contracts with invalid IV (often -1 or extremely high/low artifacts)
+    # Negative or zero IV is mathematically invalid and breaks Black-Scholes calculations
+    # yfinance sometimes returns -1 as a placeholder for missing data
     if 'impliedVolatility' in df.columns:
          df = df[df['impliedVolatility'] > 0]
          
     return df
 
-def get_options_chain(ticker: yf.Ticker):
+def get_options_chain(ticker: yf.Ticker) -> dict:
     """
-    Fetches the full options chain for a given ticker.
+    Fetches and cleans options chains for all available expiration dates.
+    
+    Iterates through all expirations and cleans the data to remove invalid contracts.
+    Uses a simple wrapper class to maintain the calls/puts structure expected by
+    downstream consumers while allowing cleaned data to be stored.
+    
+    Args:
+        ticker: yfinance Ticker object for the underlying asset
+        
+    Returns:
+        Dictionary mapping expiration dates (YYYY-MM-DD) to OptionChain objects
+        containing cleaned calls and puts DataFrames
     """
-    # yfinance returns a tuple of expiration dates
+    # yfinance provides expiration dates as a tuple
     expirations = ticker.options
     
     chain = {}
@@ -39,20 +73,12 @@ def get_options_chain(ticker: yf.Ticker):
         try:
             options = ticker.option_chain(expiration)
             
-            # Clean the data
+            # Remove invalid contracts that would break calculations
             cleaned_calls = clean_options_data(options.calls)
             cleaned_puts = clean_options_data(options.puts)
             
-            # Assign back (using a simple object or named tuple wrapper might be better, 
-            # but for now we just update the objects if they are mutable, 
-            # or we can just construct a simple object since we consume it in calculation_service)
-            
-            # yfinance returns a NamedTuple, so we can't modify it in place easily. 
-            # We'll store it in a dictionary or custom class.
-            # However, existing consumers expect the named tuple structure (calls, puts).
-            # Let's create a simple class to mimic the structure or just overwrite the attributes if possible (unlikely).
-            # Better: create a named tuple replacement or just a class.
-            
+            # Wrap in a simple class to maintain the calls/puts interface
+            # yfinance returns NamedTuples which are immutable, so we need a wrapper
             class OptionChain:
                 def __init__(self, calls, puts):
                     self.calls = calls
@@ -61,14 +87,28 @@ def get_options_chain(ticker: yf.Ticker):
             chain[expiration] = OptionChain(cleaned_calls, cleaned_puts)
             
         except Exception as e:
+            # Skip failed expirations rather than failing entire request
+            # Some expirations may be unavailable due to data issues
             print(f"Error fetching chain for {expiration}: {e}")
             continue
         
     return chain
 
-def get_historical_data(ticker: yf.Ticker, period: str = "1y"):
+def get_historical_data(ticker: yf.Ticker, period: str = "1y") -> pd.DataFrame:
     """
-    Fetches historical stock data for a given period.
+    Fetches historical price data for volatility calculations.
+    
+    Used primarily for calculating historical volatility (HV) to compare
+    against implied volatility (IV). The default 1-year period provides
+    sufficient data points for rolling volatility calculations while avoiding
+    excessive API calls.
+    
+    Args:
+        ticker: yfinance Ticker object
+        period: Time period string (e.g., "1y", "6mo", "90d")
+        
+    Returns:
+        DataFrame with OHLCV data indexed by date
     """
     return ticker.history(period=period)
 

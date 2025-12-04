@@ -1,27 +1,53 @@
-from fastapi import FastAPI, Query
-from .services import options_service, calculation_service
+# external
 import pandas as pd
+from fastapi import FastAPI, HTTPException
+from typing import Optional
 
-app = FastAPI()
+# internal
+from .models import (
+    HistoricalPriceItem,
+    HistoricalPriceResponse,
+    HistoricalVolatilityItem,
+    IVHVChartResponse,
+    OpenInterestDataItem,
+    OpenInterestResponse,
+    Summary,
+    VolatilitySurfaceResponse,
+)
+from .services import calculation_service, options_service
+
+app: FastAPI = FastAPI()
 
 
 @app.get("/")
-def read_root():
+def read_root() -> dict:
     return {"Hello": "World"}
 
 
 @app.get("/health")
-def health_check():
+def health_check() -> dict:
     return {"status": "ok"}
 
-@app.get("/api/v1/ticker/{ticker_symbol}/volatility-surface")
-def get_volatility_surface(ticker_symbol: str):
+
+@app.get("/api/v1/ticker/{ticker_symbol}/volatility-surface", response_model=VolatilitySurfaceResponse)
+def get_volatility_surface(ticker_symbol: str) -> VolatilitySurfaceResponse:
     """
-    Endpoint to get the data for the volatility surface plot.
+    Returns volatility surface data with interpolated mesh and Greeks.
+    
+    Fetches all available option chains and calculates implied volatility
+    across strikes and expirations. Also computes Greeks for risk analysis.
+    The current spot price is needed for accurate Greeks calculations.
+    
+    Args:
+        ticker_symbol: Stock ticker symbol
+        
+    Returns:
+        VolatilitySurfaceResponse with raw data, mesh grids, and Greeks
     """
     ticker = options_service.get_ticker_data(ticker_symbol)
     
-    # Need current price for Greeks calculation
+    # Greeks require current price for Black-Scholes calculations
+    # If unavailable, surface data can still be generated without Greeks
     try:
         current_price = ticker.history(period="1d")['Close'].iloc[-1]
     except:
@@ -29,20 +55,35 @@ def get_volatility_surface(ticker_symbol: str):
         
     options_chain = options_service.get_options_chain(ticker)
     surface_data = calculation_service.prepare_volatility_surface_data(options_chain, current_price)
-    return surface_data
+    
+    if not surface_data:
+        raise HTTPException(status_code=404, detail="No volatility surface data available for this ticker")
+    
+    return VolatilitySurfaceResponse(**surface_data)
 
-@app.get("/api/v1/ticker/{ticker_symbol}/open-interest")
-def get_open_interest(ticker_symbol: str, expiration_date: str = None):
+
+@app.get("/api/v1/ticker/{ticker_symbol}/open-interest", response_model=OpenInterestResponse)
+def get_open_interest(ticker_symbol: str, expiration_date: Optional[str] = None) -> OpenInterestResponse:
     """
-    Endpoint to get open interest and volume by strike for a given expiration.
-    Also returns derived metrics (PCR, Avg IV) for the Market Summary dashboard.
+    Returns open interest and volume data with market summary metrics.
+    
+    Aggregates call and put open interest/volume by strike to identify
+    support/resistance levels (put/call walls). Also calculates Put/Call
+    Ratio and average IV as market sentiment indicators.
+    
+    Args:
+        ticker_symbol: Stock ticker symbol
+        expiration_date: Optional specific expiration (defaults to nearest)
+        
+    Returns:
+        OpenInterestResponse with strike-level data and summary metrics
     """
     ticker = options_service.get_ticker_data(ticker_symbol)
     
     # Get the first expiration date
     expirations = ticker.options
     if not expirations:
-        return {"error": "No options expirations found for this ticker."}
+        raise HTTPException(status_code=404, detail="No options expirations found for this ticker")
     
     target_expiration = expiration_date if expiration_date in expirations else expirations[0]
     options = ticker.option_chain(target_expiration)
@@ -70,23 +111,33 @@ def get_open_interest(ticker_symbol: str, expiration_date: str = None):
     all_ivs = all_ivs[all_ivs > 0]
     avg_iv = all_ivs.mean() if not all_ivs.empty else 0
     
-    summary = {
-        "putCallRatio": round(pcr, 2),
-        "averageIV": round(avg_iv, 4),
-        "totalVolume": int(total_call_vol + total_put_vol),
-        "targetExpiration": target_expiration,
-        "availableExpirations": expirations
-    }
+    summary = Summary(
+        putCallRatio=round(pcr, 2),
+        averageIV=round(avg_iv, 4),
+        totalVolume=int(total_call_vol + total_put_vol),
+        targetExpiration=target_expiration,
+        availableExpirations=expirations
+    )
     
-    return {
-        "data": merged_data.to_dict(orient='records'),
-        "summary": summary
-    }
+    data_items = [OpenInterestDataItem(**item) for item in merged_data.to_dict(orient='records')]
+    
+    return OpenInterestResponse(data=data_items, summary=summary)
 
-@app.get("/api/v1/ticker/{ticker_symbol}/iv-hv-chart")
-def get_iv_hv_chart(ticker_symbol: str):
+
+@app.get("/api/v1/ticker/{ticker_symbol}/iv-hv-chart", response_model=IVHVChartResponse)
+def get_iv_hv_chart(ticker_symbol: str) -> IVHVChartResponse:
     """
-    Endpoint to get data for the IV vs HV chart.
+    Returns historical volatility time series and current implied volatility.
+    
+    Compares realized volatility (HV) against market expectations (IV) to
+    identify when options are relatively cheap or expensive. High IV relative
+    to HV suggests options are overpriced, while low IV suggests bargains.
+    
+    Args:
+        ticker_symbol: Stock ticker symbol
+        
+    Returns:
+        IVHVChartResponse with HV time series and current IV value
     """
     ticker = options_service.get_ticker_data(ticker_symbol)
     
@@ -109,24 +160,36 @@ def get_iv_hv_chart(ticker_symbol: str):
     hv_data.columns = ['date', 'hv']
     hv_data['date'] = hv_data['date'].dt.strftime('%Y-%m-%d')
     
-    return {
-        "historicalVolatility": hv_data.to_dict(orient='records'),
-        "impliedVolatility": avg_iv
-    }
+    hv_items = [HistoricalVolatilityItem(**item) for item in hv_data.to_dict(orient='records')]
+    
+    return IVHVChartResponse(historicalVolatility=hv_items, impliedVolatility=avg_iv)
 
-@app.get("/api/v1/ticker/{ticker_symbol}/historical-price")
-def get_historical_price(ticker_symbol: str):
+
+@app.get("/api/v1/ticker/{ticker_symbol}/historical-price", response_model=HistoricalPriceResponse)
+def get_historical_price(ticker_symbol: str) -> HistoricalPriceResponse:
     """
-    Endpoint to get the last 90 days of historical price data.
+    Returns recent historical price data for price action visualization.
+    
+    Provides 90 days of closing prices to overlay with options-derived
+    support/resistance levels. This timeframe balances detail with
+    performance and covers most relevant trading periods.
+    
+    Args:
+        ticker_symbol: Stock ticker symbol
+        
+    Returns:
+        HistoricalPriceResponse with date and price pairs
     """
     ticker = options_service.get_ticker_data(ticker_symbol)
     hist_data = ticker.history(period="90d")
     
     if hist_data.empty:
-        return {"error": "Could not fetch historical price data."}
+        raise HTTPException(status_code=404, detail="Could not fetch historical price data")
         
     hist_data = hist_data[['Close']].reset_index()
     hist_data.columns = ['date', 'price']
     hist_data['date'] = hist_data['date'].dt.strftime('%Y-%m-%d')
     
-    return hist_data.to_dict(orient='records')
+    price_items = [HistoricalPriceItem(**item) for item in hist_data.to_dict(orient='records')]
+    
+    return HistoricalPriceResponse(data=price_items)

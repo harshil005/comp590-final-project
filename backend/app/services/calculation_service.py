@@ -1,4 +1,7 @@
+# built-in
 import sys
+from datetime import datetime
+from typing import Dict, List, Optional
 from unittest.mock import MagicMock
 
 # --- MONKEY PATCH START ---
@@ -12,26 +15,56 @@ if "_testcapi" not in sys.modules:
     sys.modules["_testcapi"] = mock_testcapi
 # --- MONKEY PATCH END ---
 
-import pandas as pd
+# external
 import numpy as np
-from datetime import datetime
-from scipy.interpolate import griddata
+import pandas as pd
 from py_vollib_vectorized import get_all_greeks
+from scipy.interpolate import griddata
+
+# internal
 
 def calculate_historical_volatility(historical_data: pd.DataFrame, window: int = 252) -> pd.Series:
     """
-    Calculates the annualized historical volatility.
+    Calculates annualized historical volatility using log returns.
+    
+    Uses the standard deviation of log returns over a rolling window, then
+    annualizes by multiplying by sqrt(trading days). The 252-day window
+    represents one trading year and provides a stable volatility estimate
+    that can be directly compared to annualized implied volatility.
+    
+    Args:
+        historical_data: DataFrame with 'Close' prices
+        window: Rolling window size in trading days (default 252 = 1 year)
+        
+    Returns:
+        Series of annualized volatility values
     """
+    # Log returns are used because they're symmetric and time-additive
     log_returns = np.log(historical_data['Close'] / historical_data['Close'].shift(1))
     daily_volatility = log_returns.rolling(window=window).std()
+    # Annualize by scaling by sqrt of trading days per year
     annualized_volatility = daily_volatility * np.sqrt(window)
     return annualized_volatility
 
-def prepare_volatility_surface_data(options_chain, underlying_price=None):
+def prepare_volatility_surface_data(options_chain: dict, underlying_price: Optional[float] = None) -> Dict:
     """
-    Prepares the data for the 3D volatility surface plot and Greek calculations.
-    Extracts strike price, time to expiration, and implied volatility.
-    Returns both raw scattered points, interpolated mesh grid, and detailed Greek data.
+    Prepares volatility surface data with Greeks for visualization and analysis.
+    
+    Processes all option contracts across all expirations to create:
+    1. Raw data points for scatter plots
+    2. Interpolated mesh grid for 3D surface visualization
+    3. Complete Greeks (Delta, Gamma, Theta, Vega, Vanna, Charm) for each contract
+    
+    The interpolation creates a smooth surface from sparse market data, making
+    it easier to identify volatility patterns and find cheap/expensive options.
+    Greeks are calculated using Black-Scholes with vectorized operations for efficiency.
+    
+    Args:
+        options_chain: Dictionary mapping expiration dates to OptionChain objects
+        underlying_price: Current spot price (required for Greeks, optional for surface only)
+        
+    Returns:
+        Dictionary containing raw points, mesh grids, and Greeks data
     """
     strikes = []
     times = []
