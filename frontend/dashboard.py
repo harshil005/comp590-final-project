@@ -10,29 +10,24 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 from scipy.stats import norm
 
 # internal
 
 # --- COLOR SCHEME HELPER FUNCTIONS ---
-def get_call_color(is_dark_mode: bool, is_color_blind: bool) -> str:
-    """Returns call color based on mode and color blind preference."""
+def get_call_color(is_color_blind: bool) -> str:
+    """Returns call color based on color blind preference."""
     if is_color_blind:
-        # Blue for color blind mode - very bright for visibility
-        return '#42A5F5' if is_dark_mode else '#1976D2'  # Very bright blue
+        return '#1976D2'  # Blue for color blind mode
     else:
-        # Very bright green for maximum visibility in dark mode
-        return '#66BB6A' if is_dark_mode else '#2E7D32'  # Very bright green
+        return '#2E7D32'  # Green
 
-def get_put_color(is_dark_mode: bool, is_color_blind: bool) -> str:
-    """Returns put color based on mode and color blind preference."""
+def get_put_color(is_color_blind: bool) -> str:
+    """Returns put color based on color blind preference."""
     if is_color_blind:
-        # Orange for color blind mode - very bright for visibility
-        return '#FFB74D' if is_dark_mode else '#F57C00'  # Very bright orange
+        return '#F57C00'  # Orange for color blind mode
     else:
-        # Very bright red for maximum visibility in dark mode
-        return '#EF5350' if is_dark_mode else '#C62828'  # Very bright red
+        return '#C62828'  # Red
 
 def get_heatmap_colorscale(is_color_blind: bool) -> str:
     """Returns color blind friendly colorscale for heatmaps."""
@@ -43,195 +38,31 @@ def get_heatmap_colorscale(is_color_blind: bool) -> str:
         # Traditional red scale (but we'll use a darker variant)
         return 'Reds'
 
-# Legacy color constants (kept for backward compatibility, but should use functions above)
-CALL_COLOR_LIGHT = '#1B5E20'  # Very dark green for better contrast
-CALL_COLOR_DARK = '#1B5E20'   # Very dark green for better contrast
-PUT_COLOR_LIGHT = '#B71C1C'   # Very dark red for better contrast
-PUT_COLOR_DARK = '#B71C1C'    # Very dark red for better contrast
-
 # --- TEXT AND UI COLOR CONSTANTS ---
-# Text colors for dark/light mode
-TEXT_COLOR_DARK = '#FFFFFF'
-TEXT_COLOR_LIGHT = '#000000'
-AXIS_TITLE_COLOR_DARK = '#FFFFFF'
-AXIS_TITLE_COLOR_LIGHT = '#000000'
-TICK_COLOR_DARK = '#CCCCCC'
-TICK_COLOR_LIGHT = '#333333'
-GRID_COLOR_DARK = 'rgba(128,128,128,0.2)'
-GRID_COLOR_LIGHT = 'rgba(128,128,128,0.1)'
-LEGEND_COLOR_DARK = '#FFFFFF'
-LEGEND_COLOR_LIGHT = '#000000'
+TEXT_COLOR = '#000000'
+AXIS_TITLE_COLOR = '#000000'
+TICK_COLOR = '#333333'
+GRID_COLOR = 'rgba(128,128,128,0.1)'
+LEGEND_COLOR = '#000000'
 
-def get_chart_theme_colors(is_dark_mode: bool) -> dict:
+def get_chart_theme_colors() -> dict:
     """
     Returns a dictionary of all theme colors for chart configuration.
     
-    Args:
-        is_dark_mode: Whether dark mode is enabled
-        
     Returns:
         Dictionary with all theme color values
     """
     return {
-        'text_color': TEXT_COLOR_DARK if is_dark_mode else TEXT_COLOR_LIGHT,
-        'axis_title_color': AXIS_TITLE_COLOR_DARK if is_dark_mode else AXIS_TITLE_COLOR_LIGHT,
-        'tick_color': TICK_COLOR_DARK if is_dark_mode else TICK_COLOR_LIGHT,
-        'grid_color': GRID_COLOR_DARK if is_dark_mode else GRID_COLOR_LIGHT,
-        'legend_color': LEGEND_COLOR_DARK if is_dark_mode else LEGEND_COLOR_LIGHT,
-        'plot_bg_color': 'rgba(0,0,0,0)' if is_dark_mode else 'rgba(255,255,255,0)',
-        'paper_bg_color': 'rgba(0,0,0,0)' if is_dark_mode else 'rgba(255,255,255,0)'
+        'text_color': TEXT_COLOR,
+        'axis_title_color': AXIS_TITLE_COLOR,
+        'tick_color': TICK_COLOR,
+        'grid_color': GRID_COLOR,
+        'legend_color': LEGEND_COLOR,
+        'plot_bg_color': 'rgba(255,255,255,0)',
+        'paper_bg_color': 'rgba(255,255,255,0)'
     }
 
 # --- HELPER FUNCTIONS ---
-def create_sync_script(chart_ids: list, sync_key: str = 'x') -> str:
-    """
-    Creates JavaScript code to synchronize hover/selection events across multiple Plotly charts.
-    Uses a simpler approach that finds charts by their order in the DOM.
-    
-    Args:
-        chart_ids: List of chart keys to synchronize (used for identification)
-        sync_key: The key to match on ('x' for strike price/date, 'pointNumber' for index)
-        
-    Returns:
-        HTML string with JavaScript synchronization code
-    """
-    num_charts = len(chart_ids)
-    return f"""
-    <script>
-    (function() {{
-        // Wait for Plotly to be available
-        function initSync() {{
-            if (typeof window.Plotly === 'undefined') {{
-                setTimeout(initSync, 100);
-                return;
-            }}
-            
-            const syncKey = '{sync_key}';
-            let charts = [];
-            let initialized = false;
-            
-            // Function to find point index by x-value
-            function findPointByX(trace, xValue) {{
-                if (!trace || !trace.x) return null;
-                
-                for (let i = 0; i < trace.x.length; i++) {{
-                    const x = trace.x[i];
-                    if (typeof x === 'number' && typeof xValue === 'number') {{
-                        // For numeric values, allow small tolerance
-                        if (Math.abs(x - xValue) < 0.01) return i;
-                    }} else if (String(x) === String(xValue)) {{
-                        return i;
-                    }}
-                }}
-                return null;
-            }}
-            
-            // Function to synchronize hover across charts
-            function syncHover(sourceIndex, hoverData) {{
-                if (!hoverData || !hoverData.points || hoverData.points.length === 0) return;
-                
-                const sourcePoint = hoverData.points[0];
-                const syncValue = sourcePoint[syncKey];
-                
-                // Sync to all other charts
-                charts.forEach((gd, index) => {{
-                    if (index === sourceIndex || !gd || !gd.data || gd.data.length === 0) return;
-                    
-                    // Try all traces to find matching point
-                    for (let traceIdx = 0; traceIdx < gd.data.length; traceIdx++) {{
-                        const trace = gd.data[traceIdx];
-                        let pointIndex = null;
-                        
-                        if (syncKey === 'x') {{
-                            pointIndex = findPointByX(trace, syncValue);
-                        }} else if (syncKey === 'pointNumber') {{
-                            pointIndex = sourcePoint.pointNumber;
-                        }}
-                        
-                        if (pointIndex !== null && pointIndex < trace.x.length) {{
-                            try {{
-                                Plotly.Fx.hover(gd, {{
-                                    points: [{{
-                                        curveNumber: traceIdx,
-                                        pointNumber: pointIndex,
-                                        x: trace.x[pointIndex],
-                                        y: trace.y ? trace.y[pointIndex] : null
-                                    }}]
-                                }});
-                                break; // Found and hovered, move to next chart
-                            }} catch(e) {{
-                                // Continue to next trace
-                            }}
-                        }}
-                    }}
-                }});
-            }}
-            
-            // Find and register charts
-            function registerCharts() {{
-                // Find all Plotly charts in the document
-                const allCharts = Array.from(document.querySelectorAll('.js-plotly-plot'));
-                
-                // Filter to only charts that are fully initialized
-                const readyCharts = allCharts.filter(gd => gd && gd._fullLayout && gd.data && gd.data.length > 0);
-                
-                // If we have the expected number of charts and they're different from before
-                if (readyCharts.length >= {num_charts} && (charts.length !== readyCharts.length || !charts.every((c, i) => c === readyCharts[i]))) {{
-                    charts = readyCharts.slice(0, {num_charts});
-                    
-                    // Remove old event listeners and add new ones
-                    charts.forEach((gd, index) => {{
-                        // Remove existing listeners by cloning (Plotly doesn't have removeEventListener)
-                        if (gd._hoverListeners) {{
-                            gd.removeAllListeners('plotly_hover');
-                            gd.removeAllListeners('plotly_click');
-                        }}
-                        
-                        // Add new listeners
-                        gd.on('plotly_hover', function(data) {{
-                            syncHover(index, data);
-                        }});
-                        
-                        gd.on('plotly_click', function(data) {{
-                            syncHover(index, data);
-                        }});
-                    }});
-                    
-                    initialized = true;
-                }}
-            }}
-            
-            // Register charts with multiple attempts
-            setTimeout(registerCharts, 300);
-            setTimeout(registerCharts, 800);
-            setTimeout(registerCharts, 1500);
-            setTimeout(registerCharts, 2500);
-            
-            // Watch for new charts being added
-            const observer = new MutationObserver(function() {{
-                if (!initialized || charts.length < {num_charts}) {{
-                    registerCharts();
-                }}
-            }});
-            
-            observer.observe(document.body, {{ 
-                childList: true, 
-                subtree: true,
-                attributes: true,
-                attributeFilter: ['class']
-            }});
-        }}
-        
-        // Start initialization
-        if (document.readyState === 'loading') {{
-            document.addEventListener('DOMContentLoaded', initSync);
-        }} else {{
-            initSync();
-        }}
-    }})();
-    </script>
-    """
-
 def calculate_gex_profile(df_greeks: pd.DataFrame, spot_price: float) -> pd.DataFrame:
     """
     Calculates Gamma Exposure (GEX) Profile per strike.
@@ -372,210 +203,19 @@ API_URL = os.getenv("API_URL", "http://localhost:8000/api/v1")
 # Display title immediately
 st.title("Stock Options Visualization Engine")
 
-# --- CSS for Production Polish (Dark Mode & Alignment) ---
-if "dark_mode" not in st.session_state:
-    st.session_state["dark_mode"] = False
-
-def apply_theme():
-    if st.session_state["dark_mode"]:
-        st.markdown("""
-            <style>
-            /* Force Pure Black Background */
-            .stApp {
-                background-color: #000000 !important;
-                color: #FFFFFF !important;
-            }
-            /* Fix Sidebar contrast in dark mode */
-            section[data-testid="stSidebar"] {
-                background-color: #111111 !important;
-            }
-            /* Metric Cards Polish */
-            div[data-testid="stMetricValue"] {
-                color: #4CAF50 !important; /* Green for values */
-            }
-            /* Custom Container Borders */
-            div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] {
-                border-color: #333333;
-            }
-            /* Fix all text colors in dark mode */
-            .stMarkdown, .stMarkdown p, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4, .stMarkdown h5, .stMarkdown h6 {
-                color: #FFFFFF !important;
-            }
-            /* Fix selectbox and radio button labels */
-            label[data-testid="stWidgetLabel"], .stSelectbox label, .stRadio label, .stCheckbox label, .stSlider label {
-                color: #FFFFFF !important;
-            }
-            /* Fix caption text */
-            .stCaption {
-                color: #CCCCCC !important;
-            }
-            /* Fix all widget labels */
-            div[data-testid="stWidgetLabel"], label[data-testid="stWidgetLabel"] {
-                color: #FFFFFF !important;
-            }
-            /* Fix text input labels */
-            label[for*="ticker"], label {
-                color: #FFFFFF !important;
-            }
-            /* Fix expander headers */
-            .streamlit-expanderHeader, .streamlit-expanderHeader p {
-                color: #FFFFFF !important;
-            }
-            /* Fix expander content - CRITICAL for Visualization Settings visibility */
-            [data-testid="stExpander"] p {
-                color: #FFFFFF !important;
-            }
-            [data-testid="stExpander"] .st-emotion-cache-fqgod8 p,
-            [data-testid="stExpander"] .st-emotion-cache-1sh7rz9 p,
-            [data-testid="stExpander"] .st-emotion-cache-1n8dvl8 p,
-            [data-testid="stExpander"] .st-emotion-cache-ai037n p {
-                color: #FFFFFF !important;
-            }
-            /* Fix container text */
-            [data-testid="stVerticalBlock"], [data-testid="stVerticalBlock"] p, [data-testid="stVerticalBlock"] div {
-                color: #FFFFFF !important;
-            }
-            /* Fix all p tags and divs in sidebar */
-            section[data-testid="stSidebar"] p,
-            section[data-testid="stSidebar"] div,
-            section[data-testid="stSidebar"] span {
-                color: #FFFFFF !important;
-            }
-            /* Fix header text */
-            h1, h2, h3, h4, h5, h6 {
-                color: #FFFFFF !important;
-            }
-            /* Fix selectbox options text */
-            .stSelectbox > div > div, .stRadio > div > label {
-                color: #FFFFFF !important;
-            }
-            /* Fix selectbox dropdown text - critical for visibility */
-            [data-baseweb="select"] {
-                color: #FFFFFF !important;
-            }
-            [data-baseweb="select"] > div {
-                color: #FFFFFF !important;
-            }
-            /* Fix dropdown options */
-            ul[role="listbox"] li, [data-baseweb="popover"] {
-                color: #000000 !important;
-                background-color: #FFFFFF !important;
-            }
-            [data-baseweb="popover"] li {
-                color: #000000 !important;
-            }
-            /* Fix sidebar button text */
-            .stButton > button {
-                color: #FFFFFF !important;
-            }
-            /* Fix sidebar header */
-            [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
-                color: #FFFFFF !important;
-            }
-            /* Fix expander text in sidebar */
-            [data-testid="stSidebar"] .streamlit-expanderHeader {
-                color: #FFFFFF !important;
-            }
-            /* Fix metric labels */
-            [data-testid="stMetricLabel"] {
-                color: #FFFFFF !important;
-            }
-            /* Fix delta text in metrics */
-            [data-testid="stMetricDelta"] {
-                color: #FFFFFF !important;
-            }
-            /* Fix radio button text */
-            .stRadio label {
-                color: #FFFFFF !important;
-            }
-            /* Fix selectbox selected text */
-            .stSelectbox [data-baseweb="select"] {
-                color: #FFFFFF !important;
-            }
-            /* Fix all text in main content */
-            main .block-container {
-                color: #FFFFFF !important;
-            }
-            /* Fix header text */
-            header h1, .stApp > header, h1, [data-testid="stHeader"] {
-                color: #FFFFFF !important;
-            }
-            /* Fix main title */
-            .stApp h1 {
-                color: #FFFFFF !important;
-            }
-            /* Fix sidebar button */
-            section[data-testid="stSidebar"] button {
-                color: #FFFFFF !important;
-                background-color: #1f77b4 !important;
-            }
-            section[data-testid="stSidebar"] button:hover {
-                background-color: #1565c0 !important;
-            }
-            /* Fix sidebar expander text */
-            section[data-testid="stSidebar"] .streamlit-expanderHeader {
-                color: #FFFFFF !important;
-            }
-            section[data-testid="stSidebar"] .streamlit-expanderHeader p {
-                color: #FFFFFF !important;
-            }
-            section[data-testid="stSidebar"] .streamlit-expanderContent {
-                color: #FFFFFF !important;
-            }
-            section[data-testid="stSidebar"] .streamlit-expanderContent p {
-                color: #FFFFFF !important;
-            }
-            /* Fix all text in sidebar expander - comprehensive */
-            section[data-testid="stSidebar"] [data-testid="stExpander"] {
-                color: #FFFFFF !important;
-            }
-            section[data-testid="stSidebar"] [data-testid="stExpander"] * {
-                color: #FFFFFF !important;
-            }
-            /* Fix button text */
-            button p, button span, button div {
-                color: #FFFFFF !important;
-            }
-            section[data-testid="stSidebar"] button {
-                color: #FFFFFF !important;
-            }
-            section[data-testid="stSidebar"] button * {
-                color: #FFFFFF !important;
-            }
-            /* Force all sidebar text white */
-            section[data-testid="stSidebar"] {
-                color: #FFFFFF !important;
-            }
-            section[data-testid="stSidebar"] * {
-                color: #FFFFFF !important;
-            }
-            /* Fix selectbox value display */
-            [data-baseweb="select"] [aria-live] {
-                color: #FFFFFF !important;
-            }
-            /* Fix selectbox placeholder and selected value */
-            [data-baseweb="select"] > div:first-child {
-                color: #FFFFFF !important;
-            }
-            </style>
-        """, unsafe_allow_html=True)
-
 # Sidebar
 st.sidebar.header("Configuration")
 ticker = st.sidebar.text_input("Ticker Symbol", value="SPY", help="Stock ticker symbol to analyze (e.g., SPY, AAPL, TSLA)").upper()
 
-# Sidebar Visualization Settings (New)
+# Sidebar Visualization Settings
 if "color_blind_mode" not in st.session_state:
     st.session_state["color_blind_mode"] = False
 
 with st.sidebar.expander("Visualization Settings", expanded=False):
-    st.session_state["dark_mode"] = st.checkbox("Dark Mode (Pure Black)", value=st.session_state["dark_mode"])
     st.session_state["color_blind_mode"] = st.checkbox("Color Blind Mode (Blue/Orange)", value=st.session_state["color_blind_mode"], help="Uses blue/orange instead of green/red for better color blind accessibility")
     
     st.caption("Heatmap Outlier Handling")
     percentile_cap = st.slider("Color Cap (Percentile)", 50, 100, 99, help="Cap colors at this percentile to ignore extreme outliers.")
-
-apply_theme() # Apply CSS based on state
 
 # Helper function for tooltips - comprehensive vocabulary from removed sidebar
 def get_tooltip(term: str) -> str:
@@ -680,17 +320,16 @@ if analyze_btn:
 # --- MAIN CONTENT ---
 if st.session_state['data']:
     data = st.session_state['data']
-    is_dark_mode = st.session_state["dark_mode"]
-    chart_template = "plotly_dark" if is_dark_mode else "plotly"
+    chart_template = "plotly"
     
     # Theme-aware colors with color blind support
     is_color_blind = st.session_state.get("color_blind_mode", False)
-    call_color = get_call_color(is_dark_mode, is_color_blind)
-    put_color = get_put_color(is_dark_mode, is_color_blind)
+    call_color = get_call_color(is_color_blind)
+    put_color = get_put_color(is_color_blind)
     heatmap_colorscale = get_heatmap_colorscale(is_color_blind)
     
     # Get all theme colors from centralized function
-    theme_colors = get_chart_theme_colors(is_dark_mode)
+    theme_colors = get_chart_theme_colors()
     text_color = theme_colors['text_color']
     axis_title_color = theme_colors['axis_title_color']
     tick_color = theme_colors['tick_color']
@@ -773,7 +412,7 @@ if st.session_state['data']:
                 fig_map = go.Figure()
 
                 # Price line color adapts to theme for visibility
-                price_line_color = '#FFFFFF' if is_dark_mode else '#1f77b4'
+                price_line_color = '#1f77b4'
                 fig_map.add_trace(go.Scatter(
                     x=hist_df['date'], 
                     y=hist_df['price'], 
@@ -1210,7 +849,7 @@ if st.session_state['data']:
                 )
                 if x_axis_option == "Expiration Date":
                     fig_oi.update_layout(xaxis=dict(tickangle=-45))
-                st.plotly_chart(fig_oi, use_container_width=True, key=f"oi_range_{x_axis_option}")
+                st.plotly_chart(fig_oi, use_container_width=True)
                 
                 # Volume Chart (full width)
                 st.markdown("**Volume**")
@@ -1254,11 +893,7 @@ if st.session_state['data']:
                 )
                 if x_axis_option == "Expiration Date":
                     fig_vol.update_layout(xaxis=dict(tickangle=-45))
-                st.plotly_chart(fig_vol, use_container_width=True, key=f"vol_range_{x_axis_option}")
-                
-                # Add synchronization script for OI and Volume range charts
-                sync_ids_oi_vol = [f"oi_range_{x_axis_option}", f"vol_range_{x_axis_option}"]
-                components.html(create_sync_script(sync_ids_oi_vol, sync_key='x'), height=0)
+                st.plotly_chart(fig_vol, use_container_width=True)
             
             # --- Selected Date Drill-Down Section ---
             if not df_range.empty:
@@ -1337,7 +972,7 @@ if st.session_state['data']:
                             ),
                             legend=dict(font=dict(color=legend_color))
                         )
-                        st.plotly_chart(fig_oi_by_strike, use_container_width=True, key=f"oi_strike_{selected_date}")
+                        st.plotly_chart(fig_oi_by_strike, use_container_width=True)
                     
                     with col_vol:
                         st.markdown("**Volume by Strike**")
@@ -1379,11 +1014,7 @@ if st.session_state['data']:
                             ),
                             legend=dict(font=dict(color=legend_color))
                         )
-                        st.plotly_chart(fig_vol_by_strike, use_container_width=True, key=f"vol_strike_{selected_date}")
-                    
-                    # Add synchronization script for OI and Volume selected date charts
-                    sync_ids_oi_vol_strike = [f"oi_strike_{selected_date}", f"vol_strike_{selected_date}"]
-                    components.html(create_sync_script(sync_ids_oi_vol_strike, sync_key='x'), height=0)
+                        st.plotly_chart(fig_vol_by_strike, use_container_width=True)
                     
                     # Add Greeks Slice Analysis
                     st.markdown("---")
@@ -1413,9 +1044,6 @@ if st.session_state['data']:
                     filtered_df = selected_date_data[selected_date_data['type'] == selected_type].sort_values('strike')
                     
                     if not filtered_df.empty:
-                        # Store strike prices for synchronization
-                        strikes_list = filtered_df['strike'].tolist()
-                        
                         col_g1, col_g2, col_g3 = st.columns(3)
                         with col_g1:
                             fig_delta = go.Figure(go.Scatter(
@@ -1423,8 +1051,7 @@ if st.session_state['data']:
                                 y=filtered_df['delta'], 
                                 mode='lines', 
                                 name='Delta',
-                                hovertemplate='Strike: $%{x:,.0f}<br>Delta: %{y:.4f}<extra></extra>',
-                                customdata=strikes_list
+                                hovertemplate='Strike: $%{x:,.0f}<br>Delta: %{y:.4f}<extra></extra>'
                             ))
                             fig_delta.update_layout(
                                 title="Delta",
@@ -1446,15 +1073,14 @@ if st.session_state['data']:
                                 ),
                                 legend=dict(font=dict(color=legend_color))
                             )
-                            st.plotly_chart(fig_delta, use_container_width=True, key=f"delta_chart_{selected_date}")
+                            st.plotly_chart(fig_delta, use_container_width=True)
                         with col_g2:
                             fig_gamma = go.Figure(go.Scatter(
                                 x=filtered_df['strike'], 
                                 y=filtered_df['gamma'], 
                                 mode='lines', 
                                 name='Gamma',
-                                hovertemplate='Strike: $%{x:,.0f}<br>Gamma: %{y:.6f}<extra></extra>',
-                                customdata=strikes_list
+                                hovertemplate='Strike: $%{x:,.0f}<br>Gamma: %{y:.6f}<extra></extra>'
                             ))
                             fig_gamma.update_layout(
                                 title="Gamma",
@@ -1476,14 +1102,13 @@ if st.session_state['data']:
                                 ),
                                 legend=dict(font=dict(color=legend_color))
                             )
-                            st.plotly_chart(fig_gamma, use_container_width=True, key=f"gamma_chart_{selected_date}")
+                            st.plotly_chart(fig_gamma, use_container_width=True)
                         with col_g3:
                             fig_theta = go.Figure(go.Bar(
                                 x=filtered_df['strike'], 
                                 y=filtered_df['theta'], 
                                 name='Theta',
-                                hovertemplate='Strike: $%{x:,.0f}<br>Theta: $%{y:.4f}/day<extra></extra>',
-                                customdata=strikes_list
+                                hovertemplate='Strike: $%{x:,.0f}<br>Theta: $%{y:.4f}/day<extra></extra>'
                             ))
                             fig_theta.update_layout(
                                 title="Theta",
@@ -1505,11 +1130,7 @@ if st.session_state['data']:
                                 ),
                                 legend=dict(font=dict(color=legend_color))
                             )
-                            st.plotly_chart(fig_theta, use_container_width=True, key=f"theta_chart_{selected_date}")
-                        
-                        # Add synchronization script for Greek charts
-                        sync_ids = [f"delta_chart_{selected_date}", f"gamma_chart_{selected_date}", f"theta_chart_{selected_date}"]
-                        components.html(create_sync_script(sync_ids, sync_key='x'), height=0)
+                            st.plotly_chart(fig_theta, use_container_width=True)
 
 else:
     st.info("Enter a ticker symbol and click 'Analyze' to begin.")
