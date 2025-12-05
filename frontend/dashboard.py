@@ -10,17 +10,228 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from scipy.stats import norm
 
 # internal
 
-# Color constants - base colors that work in both themes
-CALL_COLOR_LIGHT = '#2E7D32'  # Darker green for light mode visibility
-CALL_COLOR_DARK = '#4CAF50'   # Brighter green for dark mode visibility
-PUT_COLOR_LIGHT = '#C62828'   # Darker red for light mode visibility
-PUT_COLOR_DARK = '#EF5350'   # Brighter red for dark mode visibility
+# --- COLOR SCHEME HELPER FUNCTIONS ---
+def get_call_color(is_dark_mode: bool, is_color_blind: bool) -> str:
+    """Returns call color based on mode and color blind preference."""
+    if is_color_blind:
+        # Blue for color blind mode - very bright for visibility
+        return '#42A5F5' if is_dark_mode else '#1976D2'  # Very bright blue
+    else:
+        # Very bright green for maximum visibility in dark mode
+        return '#66BB6A' if is_dark_mode else '#2E7D32'  # Very bright green
+
+def get_put_color(is_dark_mode: bool, is_color_blind: bool) -> str:
+    """Returns put color based on mode and color blind preference."""
+    if is_color_blind:
+        # Orange for color blind mode - very bright for visibility
+        return '#FFB74D' if is_dark_mode else '#F57C00'  # Very bright orange
+    else:
+        # Very bright red for maximum visibility in dark mode
+        return '#EF5350' if is_dark_mode else '#C62828'  # Very bright red
+
+def get_heatmap_colorscale(is_color_blind: bool) -> str:
+    """Returns color blind friendly colorscale for heatmaps."""
+    if is_color_blind:
+        # Blue to orange scale for color blind mode
+        return 'Blues'  # Can be customized further
+    else:
+        # Traditional red scale (but we'll use a darker variant)
+        return 'Reds'
+
+# Legacy color constants (kept for backward compatibility, but should use functions above)
+CALL_COLOR_LIGHT = '#1B5E20'  # Very dark green for better contrast
+CALL_COLOR_DARK = '#1B5E20'   # Very dark green for better contrast
+PUT_COLOR_LIGHT = '#B71C1C'   # Very dark red for better contrast
+PUT_COLOR_DARK = '#B71C1C'    # Very dark red for better contrast
+
+# --- TEXT AND UI COLOR CONSTANTS ---
+# Text colors for dark/light mode
+TEXT_COLOR_DARK = '#FFFFFF'
+TEXT_COLOR_LIGHT = '#000000'
+AXIS_TITLE_COLOR_DARK = '#FFFFFF'
+AXIS_TITLE_COLOR_LIGHT = '#000000'
+TICK_COLOR_DARK = '#CCCCCC'
+TICK_COLOR_LIGHT = '#333333'
+GRID_COLOR_DARK = 'rgba(128,128,128,0.2)'
+GRID_COLOR_LIGHT = 'rgba(128,128,128,0.1)'
+LEGEND_COLOR_DARK = '#FFFFFF'
+LEGEND_COLOR_LIGHT = '#000000'
+
+def get_chart_theme_colors(is_dark_mode: bool) -> dict:
+    """
+    Returns a dictionary of all theme colors for chart configuration.
+    
+    Args:
+        is_dark_mode: Whether dark mode is enabled
+        
+    Returns:
+        Dictionary with all theme color values
+    """
+    return {
+        'text_color': TEXT_COLOR_DARK if is_dark_mode else TEXT_COLOR_LIGHT,
+        'axis_title_color': AXIS_TITLE_COLOR_DARK if is_dark_mode else AXIS_TITLE_COLOR_LIGHT,
+        'tick_color': TICK_COLOR_DARK if is_dark_mode else TICK_COLOR_LIGHT,
+        'grid_color': GRID_COLOR_DARK if is_dark_mode else GRID_COLOR_LIGHT,
+        'legend_color': LEGEND_COLOR_DARK if is_dark_mode else LEGEND_COLOR_LIGHT,
+        'plot_bg_color': 'rgba(0,0,0,0)' if is_dark_mode else 'rgba(255,255,255,0)',
+        'paper_bg_color': 'rgba(0,0,0,0)' if is_dark_mode else 'rgba(255,255,255,0)'
+    }
 
 # --- HELPER FUNCTIONS ---
+def create_sync_script(chart_ids: list, sync_key: str = 'x') -> str:
+    """
+    Creates JavaScript code to synchronize hover/selection events across multiple Plotly charts.
+    Uses a simpler approach that finds charts by their order in the DOM.
+    
+    Args:
+        chart_ids: List of chart keys to synchronize (used for identification)
+        sync_key: The key to match on ('x' for strike price/date, 'pointNumber' for index)
+        
+    Returns:
+        HTML string with JavaScript synchronization code
+    """
+    num_charts = len(chart_ids)
+    return f"""
+    <script>
+    (function() {{
+        // Wait for Plotly to be available
+        function initSync() {{
+            if (typeof window.Plotly === 'undefined') {{
+                setTimeout(initSync, 100);
+                return;
+            }}
+            
+            const syncKey = '{sync_key}';
+            let charts = [];
+            let initialized = false;
+            
+            // Function to find point index by x-value
+            function findPointByX(trace, xValue) {{
+                if (!trace || !trace.x) return null;
+                
+                for (let i = 0; i < trace.x.length; i++) {{
+                    const x = trace.x[i];
+                    if (typeof x === 'number' && typeof xValue === 'number') {{
+                        // For numeric values, allow small tolerance
+                        if (Math.abs(x - xValue) < 0.01) return i;
+                    }} else if (String(x) === String(xValue)) {{
+                        return i;
+                    }}
+                }}
+                return null;
+            }}
+            
+            // Function to synchronize hover across charts
+            function syncHover(sourceIndex, hoverData) {{
+                if (!hoverData || !hoverData.points || hoverData.points.length === 0) return;
+                
+                const sourcePoint = hoverData.points[0];
+                const syncValue = sourcePoint[syncKey];
+                
+                // Sync to all other charts
+                charts.forEach((gd, index) => {{
+                    if (index === sourceIndex || !gd || !gd.data || gd.data.length === 0) return;
+                    
+                    // Try all traces to find matching point
+                    for (let traceIdx = 0; traceIdx < gd.data.length; traceIdx++) {{
+                        const trace = gd.data[traceIdx];
+                        let pointIndex = null;
+                        
+                        if (syncKey === 'x') {{
+                            pointIndex = findPointByX(trace, syncValue);
+                        }} else if (syncKey === 'pointNumber') {{
+                            pointIndex = sourcePoint.pointNumber;
+                        }}
+                        
+                        if (pointIndex !== null && pointIndex < trace.x.length) {{
+                            try {{
+                                Plotly.Fx.hover(gd, {{
+                                    points: [{{
+                                        curveNumber: traceIdx,
+                                        pointNumber: pointIndex,
+                                        x: trace.x[pointIndex],
+                                        y: trace.y ? trace.y[pointIndex] : null
+                                    }}]
+                                }});
+                                break; // Found and hovered, move to next chart
+                            }} catch(e) {{
+                                // Continue to next trace
+                            }}
+                        }}
+                    }}
+                }});
+            }}
+            
+            // Find and register charts
+            function registerCharts() {{
+                // Find all Plotly charts in the document
+                const allCharts = Array.from(document.querySelectorAll('.js-plotly-plot'));
+                
+                // Filter to only charts that are fully initialized
+                const readyCharts = allCharts.filter(gd => gd && gd._fullLayout && gd.data && gd.data.length > 0);
+                
+                // If we have the expected number of charts and they're different from before
+                if (readyCharts.length >= {num_charts} && (charts.length !== readyCharts.length || !charts.every((c, i) => c === readyCharts[i]))) {{
+                    charts = readyCharts.slice(0, {num_charts});
+                    
+                    // Remove old event listeners and add new ones
+                    charts.forEach((gd, index) => {{
+                        // Remove existing listeners by cloning (Plotly doesn't have removeEventListener)
+                        if (gd._hoverListeners) {{
+                            gd.removeAllListeners('plotly_hover');
+                            gd.removeAllListeners('plotly_click');
+                        }}
+                        
+                        // Add new listeners
+                        gd.on('plotly_hover', function(data) {{
+                            syncHover(index, data);
+                        }});
+                        
+                        gd.on('plotly_click', function(data) {{
+                            syncHover(index, data);
+                        }});
+                    }});
+                    
+                    initialized = true;
+                }}
+            }}
+            
+            // Register charts with multiple attempts
+            setTimeout(registerCharts, 300);
+            setTimeout(registerCharts, 800);
+            setTimeout(registerCharts, 1500);
+            setTimeout(registerCharts, 2500);
+            
+            // Watch for new charts being added
+            const observer = new MutationObserver(function() {{
+                if (!initialized || charts.length < {num_charts}) {{
+                    registerCharts();
+                }}
+            }});
+            
+            observer.observe(document.body, {{ 
+                childList: true, 
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['class']
+            }});
+        }}
+        
+        // Start initialization
+        if (document.readyState === 'loading') {{
+            document.addEventListener('DOMContentLoaded', initSync);
+        }} else {{
+            initSync();
+        }}
+    }})();
+    </script>
+    """
+
 def calculate_gex_profile(df_greeks: pd.DataFrame, spot_price: float) -> pd.DataFrame:
     """
     Calculates Gamma Exposure (GEX) Profile per strike.
@@ -186,91 +397,238 @@ def apply_theme():
             div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] {
                 border-color: #333333;
             }
+            /* Fix all text colors in dark mode */
+            .stMarkdown, .stMarkdown p, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4, .stMarkdown h5, .stMarkdown h6 {
+                color: #FFFFFF !important;
+            }
+            /* Fix selectbox and radio button labels */
+            label[data-testid="stWidgetLabel"], .stSelectbox label, .stRadio label, .stCheckbox label, .stSlider label {
+                color: #FFFFFF !important;
+            }
+            /* Fix caption text */
+            .stCaption {
+                color: #CCCCCC !important;
+            }
+            /* Fix all widget labels */
+            div[data-testid="stWidgetLabel"], label[data-testid="stWidgetLabel"] {
+                color: #FFFFFF !important;
+            }
+            /* Fix text input labels */
+            label[for*="ticker"], label {
+                color: #FFFFFF !important;
+            }
+            /* Fix expander headers */
+            .streamlit-expanderHeader, .streamlit-expanderHeader p {
+                color: #FFFFFF !important;
+            }
+            /* Fix expander content - CRITICAL for Visualization Settings visibility */
+            [data-testid="stExpander"] p {
+                color: #FFFFFF !important;
+            }
+            [data-testid="stExpander"] .st-emotion-cache-fqgod8 p,
+            [data-testid="stExpander"] .st-emotion-cache-1sh7rz9 p,
+            [data-testid="stExpander"] .st-emotion-cache-1n8dvl8 p,
+            [data-testid="stExpander"] .st-emotion-cache-ai037n p {
+                color: #FFFFFF !important;
+            }
+            /* Fix container text */
+            [data-testid="stVerticalBlock"], [data-testid="stVerticalBlock"] p, [data-testid="stVerticalBlock"] div {
+                color: #FFFFFF !important;
+            }
+            /* Fix all p tags and divs in sidebar */
+            section[data-testid="stSidebar"] p,
+            section[data-testid="stSidebar"] div,
+            section[data-testid="stSidebar"] span {
+                color: #FFFFFF !important;
+            }
+            /* Fix header text */
+            h1, h2, h3, h4, h5, h6 {
+                color: #FFFFFF !important;
+            }
+            /* Fix selectbox options text */
+            .stSelectbox > div > div, .stRadio > div > label {
+                color: #FFFFFF !important;
+            }
+            /* Fix selectbox dropdown text - critical for visibility */
+            [data-baseweb="select"] {
+                color: #FFFFFF !important;
+            }
+            [data-baseweb="select"] > div {
+                color: #FFFFFF !important;
+            }
+            /* Fix dropdown options */
+            ul[role="listbox"] li, [data-baseweb="popover"] {
+                color: #000000 !important;
+                background-color: #FFFFFF !important;
+            }
+            [data-baseweb="popover"] li {
+                color: #000000 !important;
+            }
+            /* Fix sidebar button text */
+            .stButton > button {
+                color: #FFFFFF !important;
+            }
+            /* Fix sidebar header */
+            [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
+                color: #FFFFFF !important;
+            }
+            /* Fix expander text in sidebar */
+            [data-testid="stSidebar"] .streamlit-expanderHeader {
+                color: #FFFFFF !important;
+            }
+            /* Fix metric labels */
+            [data-testid="stMetricLabel"] {
+                color: #FFFFFF !important;
+            }
+            /* Fix delta text in metrics */
+            [data-testid="stMetricDelta"] {
+                color: #FFFFFF !important;
+            }
+            /* Fix radio button text */
+            .stRadio label {
+                color: #FFFFFF !important;
+            }
+            /* Fix selectbox selected text */
+            .stSelectbox [data-baseweb="select"] {
+                color: #FFFFFF !important;
+            }
+            /* Fix all text in main content */
+            main .block-container {
+                color: #FFFFFF !important;
+            }
+            /* Fix header text */
+            header h1, .stApp > header, h1, [data-testid="stHeader"] {
+                color: #FFFFFF !important;
+            }
+            /* Fix main title */
+            .stApp h1 {
+                color: #FFFFFF !important;
+            }
+            /* Fix sidebar button */
+            section[data-testid="stSidebar"] button {
+                color: #FFFFFF !important;
+                background-color: #1f77b4 !important;
+            }
+            section[data-testid="stSidebar"] button:hover {
+                background-color: #1565c0 !important;
+            }
+            /* Fix sidebar expander text */
+            section[data-testid="stSidebar"] .streamlit-expanderHeader {
+                color: #FFFFFF !important;
+            }
+            section[data-testid="stSidebar"] .streamlit-expanderHeader p {
+                color: #FFFFFF !important;
+            }
+            section[data-testid="stSidebar"] .streamlit-expanderContent {
+                color: #FFFFFF !important;
+            }
+            section[data-testid="stSidebar"] .streamlit-expanderContent p {
+                color: #FFFFFF !important;
+            }
+            /* Fix all text in sidebar expander - comprehensive */
+            section[data-testid="stSidebar"] [data-testid="stExpander"] {
+                color: #FFFFFF !important;
+            }
+            section[data-testid="stSidebar"] [data-testid="stExpander"] * {
+                color: #FFFFFF !important;
+            }
+            /* Fix button text */
+            button p, button span, button div {
+                color: #FFFFFF !important;
+            }
+            section[data-testid="stSidebar"] button {
+                color: #FFFFFF !important;
+            }
+            section[data-testid="stSidebar"] button * {
+                color: #FFFFFF !important;
+            }
+            /* Force all sidebar text white */
+            section[data-testid="stSidebar"] {
+                color: #FFFFFF !important;
+            }
+            section[data-testid="stSidebar"] * {
+                color: #FFFFFF !important;
+            }
+            /* Fix selectbox value display */
+            [data-baseweb="select"] [aria-live] {
+                color: #FFFFFF !important;
+            }
+            /* Fix selectbox placeholder and selected value */
+            [data-baseweb="select"] > div:first-child {
+                color: #FFFFFF !important;
+            }
             </style>
         """, unsafe_allow_html=True)
 
 # Sidebar
 st.sidebar.header("Configuration")
-ticker = st.sidebar.text_input("Ticker Symbol", value="SPY").upper()
+ticker = st.sidebar.text_input("Ticker Symbol", value="SPY", help="Stock ticker symbol to analyze (e.g., SPY, AAPL, TSLA)").upper()
 
 # Sidebar Visualization Settings (New)
+if "color_blind_mode" not in st.session_state:
+    st.session_state["color_blind_mode"] = False
+
 with st.sidebar.expander("Visualization Settings", expanded=False):
     st.session_state["dark_mode"] = st.checkbox("Dark Mode (Pure Black)", value=st.session_state["dark_mode"])
+    st.session_state["color_blind_mode"] = st.checkbox("Color Blind Mode (Blue/Orange)", value=st.session_state["color_blind_mode"], help="Uses blue/orange instead of green/red for better color blind accessibility")
     
     st.caption("Heatmap Outlier Handling")
-    use_log_scale = st.checkbox("Use Log Scale (Open Interest)", value=True, help="Compresses massive spikes to make smaller values visible.")
     percentile_cap = st.slider("Color Cap (Percentile)", 50, 100, 99, help="Cap colors at this percentile to ignore extreme outliers.")
 
 apply_theme() # Apply CSS based on state
 
-# Sidebar Educational Tooltips
-with st.sidebar.expander("What are these metrics?"):
-    st.markdown(r"""
-    ## Basic Options Concepts
-    
-    **Strike Price:**
-    The predetermined price at which you can buy (call) or sell (put) the underlying stock. It's like a "target price" you're betting the stock will reach.
-    
-    **Expiration Date:**
-    The date when an option contract expires and becomes worthless if not exercised. After this date, the option no longer exists.
-    
-    **Call Option:**
-    The right (not obligation) to BUY a stock at the strike price. You buy calls when you think the stock will go UP. Profit when stock price > strike price + premium paid.
-    
-    **Put Option:**
-    The right (not obligation) to SELL a stock at the strike price. You buy puts when you think the stock will go DOWN. Profit when stock price < strike price - premium paid.
-    
-    ## Market Activity Metrics
-    
-    **Open Interest (OI):**
-    The total number of option contracts currently "open" (not yet closed or expired). Think of it as the size of the "wall" at each strike price. High OI creates support/resistance levels where the stock price often gets "pinned" near expiration.
-    
-    **Volume:**
-    The number of contracts traded during a specific time period (today, this week, etc.). Unlike OI, volume resets each period and shows current trading activity. High volume indicates where "smart money" is placing new bets right now.
-    
-    **Put/Call Ratio (PCR):**
-    The ratio of put volume to call volume. 
-    - High PCR (> 1.0): More puts trading = bearish sentiment
-    - Low PCR (< 0.8): More calls trading = bullish sentiment
-    
-    ## Volatility Metrics
-    
-    **Implied Volatility (IV):**
-    The market's expectation of how much a stock's price will fluctuate in the future. High IV = expensive options (high fear/uncertainty). Low IV = cheap options (low expected movement).
-    
-    ## The Greeks (Risk Metrics)
-    
-    **Delta ($\Delta$):**
-    How much an option's price changes for a $1 move in the stock price.
-    - Calls: 0 to 1 (ATM calls ≈ 0.50)
-    - Puts: -1 to 0 (ATM puts ≈ -0.50)
-    - Example: Delta of 0.75 means option gains $0.75 for every $1 stock move up
-    
-    **Gamma ($\Gamma$):**
-    The rate of change of Delta. Measures how quickly your position's sensitivity changes. High Gamma = Delta changes rapidly = more risk (profits/losses accelerate quickly). Highest at-the-money.
-    
-    **Theta ($\Theta$):**
-    Time decay - how much value an option loses EVERY DAY just from the passage of time. Always negative for long positions. Options lose value as expiration approaches, even if stock price doesn't move.
-    
-    ## Market Structure Concepts
-    
-    **Support Level (Put Wall):**
-    A strike price with extremely high put open interest. Acts like a floor - the stock price often bounces up from here because market makers hedge by buying stock at these levels.
-    
-    **Resistance Level (Call Wall):**
-    A strike price with extremely high call open interest. Acts like a ceiling - the stock price often gets pushed down from here because market makers hedge by selling stock at these levels.
-    
-    **Gamma Exposure (GEX):**
-    Measures how much market makers need to hedge as stock price changes. High positive GEX = market makers buy stock on dips, creating support. High negative GEX = market makers sell stock on rallies, creating resistance.
-    
-    **Liquidity Walls:**
-    Concentrations of open interest at specific strike prices that create barriers. The stock often struggles to move through these levels, especially near expiration.
-    
-    **Max Pain:**
-    The strike price where the most options expire worthless, causing maximum losses to option buyers. Stock prices often gravitate toward max pain near expiration.
-    """)
-    
-    st.info("**Tip:** Look for strikes with both high Open Interest AND high Volume - these are the most significant levels where the market is actively trading.")
+# Helper function for tooltips - comprehensive vocabulary from removed sidebar
+def get_tooltip(term: str) -> str:
+    """Returns tooltip text for various terms and metrics."""
+    tooltips = {
+        # Market Activity Metrics
+        "Put/Call Ratio": "Ratio of put volume to call volume. High (>1.0) = bearish, Low (<0.8) = bullish sentiment.",
+        "Average IV": "Market's expectation of future price volatility. High IV = expensive options, Low IV = cheap options.",
+        "Total Volume": "Total number of option contracts traded. Shows overall market activity and liquidity.",
+        "Open Interest": "Total number of option contracts currently 'open' (not yet closed or expired). Think of it as the size of the 'wall' at each strike price. High OI creates support/resistance levels where the stock price often gets 'pinned' near expiration.",
+        "Volume": "Number of contracts traded during a specific time period. Unlike OI, volume resets each period and shows current trading activity. High volume indicates where 'smart money' is placing new bets right now.",
+        
+        # Basic Options Concepts
+        "Strike Price": "The predetermined price at which you can buy (call) or sell (put) the underlying stock. It's like a 'target price' you're betting the stock will reach.",
+        "Expiration Date": "The date when an option contract expires and becomes worthless if not exercised. After this date, the option no longer exists.",
+        "Call Option": "The right (not obligation) to BUY a stock at the strike price. You buy calls when you think the stock will go UP. Profit when stock price > strike price + premium paid.",
+        "Put Option": "The right (not obligation) to SELL a stock at the strike price. You buy puts when you think the stock will go DOWN. Profit when stock price < strike price - premium paid.",
+        
+        # Volatility Metrics
+        "Implied Volatility": "The market's expectation of how much a stock's price will fluctuate in the future. High IV = expensive options (high fear/uncertainty). Low IV = cheap options (low expected movement).",
+        "IV": "Implied Volatility - The market's expectation of future price volatility. High IV = expensive options, Low IV = cheap options.",
+        
+        # The Greeks
+        "Delta": "How much an option's price changes for a $1 move in the stock price. Calls: 0 to 1 (ATM calls ≈ 0.50). Puts: -1 to 0 (ATM puts ≈ -0.50). Example: Delta of 0.75 means option gains $0.75 for every $1 stock move up.",
+        "Gamma": "The rate of change of Delta. Measures how quickly your position's sensitivity changes. High Gamma = Delta changes rapidly = more risk (profits/losses accelerate quickly). Highest at-the-money.",
+        "Theta": "Time decay - how much value an option loses EVERY DAY just from the passage of time. Always negative for long positions. Options lose value as expiration approaches, even if stock price doesn't move.",
+        
+        # Market Structure Concepts
+        "Support Level": "A strike price with extremely high put open interest (Put Wall). Acts like a floor - the stock price often bounces up from here because market makers hedge by buying stock at these levels.",
+        "Resistance Level": "A strike price with extremely high call open interest (Call Wall). Acts like a ceiling - the stock price often gets pushed down from here because market makers hedge by selling stock at these levels.",
+        "Resistance": "A price level where selling pressure is strong, preventing the stock from rising further. In options, this is often the Call Wall - a strike with high call open interest.",
+        "Put Wall": "A strike price with extremely high put open interest. Acts like a floor - the stock price often bounces up from here because market makers hedge by buying stock at these levels.",
+        "Call Wall": "A strike price with extremely high call open interest. Acts like a ceiling - the stock price often gets pushed down from here because market makers hedge by selling stock at these levels.",
+        "Gamma Exposure": "Measures how much market makers need to hedge as stock price changes. High positive GEX = market makers buy stock on dips, creating support. High negative GEX = market makers sell stock on rallies, creating resistance.",
+        "GEX": "Gamma Exposure - Measures how much market makers need to hedge as stock price changes. High positive GEX = support, High negative GEX = resistance.",
+        "Liquidity Walls": "Concentrations of open interest at specific strike prices that create barriers. The stock often struggles to move through these levels, especially near expiration.",
+        "Max Pain": "The strike price where the most options expire worthless, causing maximum losses to option buyers. Stock prices often gravitate toward max pain near expiration.",
+        
+        # UI Elements
+        "Start Expiration": "First expiration date in the range to analyze for the 2D volatility heatmap.",
+        "End Expiration": "Last expiration date in the range to analyze for the 2D volatility heatmap.",
+        "Start Date": "First date in the range for detailed open interest and volume analysis.",
+        "End Date": "Last date in the range for detailed open interest and volume analysis.",
+        "X-Axis": "Choose whether to display data grouped by Strike Price or Expiration Date on the horizontal axis.",
+        "Option Type": "Select whether to view Greeks (Delta, Gamma, Theta) for Call options or Put options.",
+        "Selected Date": "Specific expiration date to view detailed strike-level distribution of open interest and volume."
+    }
+    return tooltips.get(term, "")
+
+# Legacy function for backward compatibility
+def get_metric_tooltip(metric_name: str) -> str:
+    """Returns tooltip text for metric labels."""
+    return get_tooltip(metric_name)
 
 # Initialize Session State for Data Persistence
 if 'data' not in st.session_state:
@@ -325,14 +683,21 @@ if st.session_state['data']:
     is_dark_mode = st.session_state["dark_mode"]
     chart_template = "plotly_dark" if is_dark_mode else "plotly"
     
-    # Theme-aware colors for better visibility in both modes
-    call_color = CALL_COLOR_DARK if is_dark_mode else CALL_COLOR_LIGHT
-    put_color = PUT_COLOR_DARK if is_dark_mode else PUT_COLOR_LIGHT
+    # Theme-aware colors with color blind support
+    is_color_blind = st.session_state.get("color_blind_mode", False)
+    call_color = get_call_color(is_dark_mode, is_color_blind)
+    put_color = get_put_color(is_dark_mode, is_color_blind)
+    heatmap_colorscale = get_heatmap_colorscale(is_color_blind)
     
-    # Chart background colors - explicitly set to ensure dark mode works
-    plot_bg_color = 'rgba(0,0,0,0)' if is_dark_mode else 'rgba(255,255,255,0)'
-    paper_bg_color = 'rgba(0,0,0,0)' if is_dark_mode else 'rgba(255,255,255,0)'
-    font_color = 'rgba(255,255,255,1)' if is_dark_mode else 'rgba(0,0,0,1)'
+    # Get all theme colors from centralized function
+    theme_colors = get_chart_theme_colors(is_dark_mode)
+    text_color = theme_colors['text_color']
+    axis_title_color = theme_colors['axis_title_color']
+    tick_color = theme_colors['tick_color']
+    grid_color = theme_colors['grid_color']
+    legend_color = theme_colors['legend_color']
+    plot_bg_color = theme_colors['plot_bg_color']
+    paper_bg_color = theme_colors['paper_bg_color']
     
     # --- MAIN DASHBOARD ---
     # --- Top Row Metrics: Comparative Market Pulse ---
@@ -344,11 +709,11 @@ if st.session_state['data']:
                 summ = st.session_state['summary']
                 m1, m2, m3 = st.columns(3)
                 pcr = summ['putCallRatio']
-                m1.metric("Put/Call Ratio", pcr, delta="Bearish" if pcr > 1.0 else ("Bullish" if pcr < 0.7 else "Neutral"), delta_color="inverse")
+                m1.metric("Put/Call Ratio", pcr, delta="Bearish" if pcr > 1.0 else ("Bullish" if pcr < 0.7 else "Neutral"), delta_color="inverse", help=get_metric_tooltip("Put/Call Ratio"))
                 avg_iv = summ['averageIV']
-                m2.metric("Average IV", f"{avg_iv:.2%}", "Fear Gauge")
+                m2.metric("Average IV", f"{avg_iv:.2%}", help=get_metric_tooltip("Average IV"))
                 vol = summ['totalVolume']
-                m3.metric("Total Volume", f"{vol:,}")
+                m3.metric("Total Volume", f"{vol:,}", help=get_metric_tooltip("Total Volume"))
     
     with c2:
         with st.container(border=True):
@@ -357,11 +722,11 @@ if st.session_state['data']:
                 spy_summ = st.session_state['spy_summary']
                 m1, m2, m3 = st.columns(3)
                 spy_pcr = spy_summ['putCallRatio']
-                m1.metric("Put/Call Ratio", spy_pcr, delta="Bearish" if spy_pcr > 1.0 else ("Bullish" if spy_pcr < 0.7 else "Neutral"), delta_color="inverse")
+                m1.metric("Put/Call Ratio", spy_pcr, delta="Bearish" if spy_pcr > 1.0 else ("Bullish" if spy_pcr < 0.7 else "Neutral"), delta_color="inverse", help=get_metric_tooltip("Put/Call Ratio"))
                 spy_avg_iv = spy_summ['averageIV']
-                m2.metric("Average IV", f"{spy_avg_iv:.2%}", "Fear Gauge")
+                m2.metric("Average IV", f"{spy_avg_iv:.2%}", help=get_metric_tooltip("Average IV"))
                 spy_vol = spy_summ['totalVolume']
-                m3.metric("Total Volume", f"{spy_vol:,}")
+                m3.metric("Total Volume", f"{spy_vol:,}", help=get_metric_tooltip("Total Volume"))
             else:
                 st.info("SPY comparison data not available")
     
@@ -409,7 +774,14 @@ if st.session_state['data']:
 
                 # Price line color adapts to theme for visibility
                 price_line_color = '#FFFFFF' if is_dark_mode else '#1f77b4'
-                fig_map.add_trace(go.Scatter(x=hist_df['date'], y=hist_df['price'], mode='lines', name='Historical Price', line=dict(color=price_line_color, width=2)))
+                fig_map.add_trace(go.Scatter(
+                    x=hist_df['date'], 
+                    y=hist_df['price'], 
+                    mode='lines', 
+                    name='Historical Price', 
+                    line=dict(color=price_line_color, width=2),
+                    hovertemplate='Date: %{x}<br>Price: $%{y:,.2f}<extra></extra>'
+                ))
 
                 # Support and resistance lines use theme-aware colors
                 if call_wall is not None:
@@ -422,9 +794,21 @@ if st.session_state['data']:
                     template=chart_template,
                     hovermode="x unified",
                     height=500,
+                    xaxis_title="Date",
+                    yaxis_title="Price ($)",
                     plot_bgcolor=plot_bg_color,
                     paper_bgcolor=paper_bg_color,
-                    font=dict(color=font_color)
+                    font=dict(color=text_color),
+                    title_font=dict(color=text_color),
+                    xaxis=dict(
+                        title_font=dict(color=axis_title_color),
+                        tickfont=dict(color=tick_color)
+                    ),
+                    yaxis=dict(
+                        title_font=dict(color=axis_title_color),
+                        tickfont=dict(color=tick_color)
+                    ),
+                    legend=dict(font=dict(color=legend_color))
                 )
                 st.plotly_chart(fig_map, use_container_width=True)
     
@@ -462,22 +846,63 @@ if st.session_state['data']:
             # 3D Volatility Surface
             if "mesh_z" in data and data["mesh_z"]:
                 st.markdown("**3D Volatility Surface**")
-                fig_surf = go.Figure(data=[go.Surface(z=data['mesh_z'], x=data['mesh_x'], y=data['mesh_y'], colorscale='Reds', cmin=0, opacity=0.9, colorbar=dict(title='IV'), lighting=dict(ambient=0.5, diffuse=0.5))])
+                # Convert mesh_z from decimal to percentage (multiply by 100)
+                mesh_z_percent = np.array(data['mesh_z']) * 100
+                
+                fig_surf = go.Figure(data=[go.Surface(
+                    z=mesh_z_percent.tolist(), 
+                    x=data['mesh_x'], 
+                    y=data['mesh_y'], 
+                    colorscale=heatmap_colorscale, 
+                    cmin=0, 
+                    opacity=0.9, 
+                    colorbar=dict(
+                        title=dict(text='Implied Volatility (%)', font=dict(color=axis_title_color)),
+                        tickfont=dict(color=tick_color),
+                        tickformat='.0f',
+                        ticksuffix='%'
+                    ), 
+                    lighting=dict(ambient=0.5, diffuse=0.5),
+                    hovertemplate='Strike: $%{x:.2f}<br>Days to Expiry: %{y:.1f}<br>IV: %{z:.1f}%<extra></extra>'
+                )])
                 fig_surf.update_layout(
-                    title='3D Volatility Surface: Find Cheap Options in Valleys',
+                    title=dict(
+                        text='3D Volatility Surface: Find Cheap Options in Valleys',
+                        font=dict(color=text_color)
+                    ),
                     template=chart_template,
                     height=600,
                     plot_bgcolor=plot_bg_color,
                     paper_bgcolor=paper_bg_color,
-                    font=dict(color=font_color),
+                    font=dict(color=text_color),
                     scene=dict(
-                        xaxis_title='Strike',
-                        yaxis_title='Days to Expiry',
-                        zaxis_title='IV',
                         bgcolor=plot_bg_color,
-                        xaxis=dict(gridcolor='rgba(128,128,128,0.2)' if is_dark_mode else 'rgba(128,128,128,0.1)'),
-                        yaxis=dict(gridcolor='rgba(128,128,128,0.2)' if is_dark_mode else 'rgba(128,128,128,0.1)'),
-                        zaxis=dict(gridcolor='rgba(128,128,128,0.2)' if is_dark_mode else 'rgba(128,128,128,0.1)')
+                        xaxis=dict(
+                            title=dict(
+                                text='Strike Price ($)',
+                                font=dict(color=axis_title_color)
+                            ),
+                            tickfont=dict(color=tick_color),
+                            gridcolor=grid_color
+                        ),
+                        yaxis=dict(
+                            title=dict(
+                                text='Days to Expiry',
+                                font=dict(color=axis_title_color)
+                            ),
+                            tickfont=dict(color=tick_color),
+                            gridcolor=grid_color
+                        ),
+                        zaxis=dict(
+                            title=dict(
+                                text='Implied Volatility (%)',
+                                font=dict(color=axis_title_color)
+                            ),
+                            tickfont=dict(color=tick_color),
+                            gridcolor=grid_color,
+                            tickformat='.0f',
+                            ticksuffix='%'
+                        )
                     )
                 )
                 st.plotly_chart(fig_surf, use_container_width=True)
@@ -487,9 +912,9 @@ if st.session_state['data']:
             st.markdown("**Configure Range Analysis**")
             col_vol1, col_vol2 = st.columns(2)
             with col_vol1:
-                start_exp_idx = st.selectbox("Start Expiration", range(len(expirations)), format_func=lambda x: expirations[x], key="vol_start_exp", index=0)
+                start_exp_idx = st.selectbox("Start Expiration", range(len(expirations)), format_func=lambda x: expirations[x], key="vol_start_exp", index=0, help=get_tooltip("Start Expiration"))
             with col_vol2:
-                end_exp_idx = st.selectbox("End Expiration", range(len(expirations)), format_func=lambda x: expirations[x], key="vol_end_exp", index=min(4, len(expirations)-1))
+                end_exp_idx = st.selectbox("End Expiration", range(len(expirations)), format_func=lambda x: expirations[x], key="vol_end_exp", index=min(4, len(expirations)-1), help=get_tooltip("End Expiration"))
             
             selected_expirations = expirations[start_exp_idx:end_exp_idx+1]
             filtered_df = df_greeks[df_greeks['expiry'].isin(selected_expirations)].copy()
@@ -516,8 +941,9 @@ if st.session_state['data']:
                         call_iv = call_data['iv'].values[0] if not call_data.empty and len(call_data['iv'].values) > 0 else None
                         put_iv = put_data['iv'].values[0] if not put_data.empty and len(put_data['iv'].values) > 0 else None
                         
-                        row_calls.append(call_iv if call_iv else None)
-                        row_puts.append(put_iv if put_iv else None)
+                        # Convert from decimal to percentage (multiply by 100)
+                        row_calls.append(call_iv * 100 if call_iv is not None else None)
+                        row_puts.append(put_iv * 100 if put_iv is not None else None)
                     
                     iv_matrix_calls.append(row_calls)
                     iv_matrix_puts.append(row_puts)
@@ -530,22 +956,33 @@ if st.session_state['data']:
                         z=iv_matrix_calls,
                         x=[exp[:10] for exp in all_expirations],  # Shorten date format
                         y=[f"${s:.0f}" for s in all_strikes],
-                        colorscale='Reds',
-                        colorbar=dict(title='Call IV'),
-                        text=[[f"{val:.2%}" if val else "" for val in row] for row in iv_matrix_calls],
-                        texttemplate='%{text}',
-                        textfont={"size": 8},
-                        hovertemplate='Strike: %{y}<br>Expiry: %{x}<br>IV: %{z:.2%}<extra></extra>'
+                        colorscale=heatmap_colorscale,
+                        colorbar=dict(
+                            title=dict(text='Call IV (%)', font=dict(color=axis_title_color)),
+                            tickfont=dict(color=tick_color),
+                            tickformat='.0f',
+                            ticksuffix='%'
+                        ),
+                        hovertemplate='Strike: %{y}<br>Expiry: %{x}<br>IV: %{z:.1f}%<extra></extra>'
                     ))
                     fig_heatmap_calls.update_layout(
                         title='Call IV Heatmap',
                         template=chart_template,
                         height=600,
-                        yaxis_title='Strike Price',
+                        yaxis_title='Strike Price ($)',
                         xaxis_title='Expiration Date',
                         plot_bgcolor=plot_bg_color,
                         paper_bgcolor=paper_bg_color,
-                        font=dict(color=font_color)
+                        font=dict(color=text_color),
+                        title_font=dict(color=text_color),
+                        xaxis=dict(
+                            title_font=dict(color=axis_title_color),
+                            tickfont=dict(color=tick_color)
+                        ),
+                        yaxis=dict(
+                            title_font=dict(color=axis_title_color),
+                            tickfont=dict(color=tick_color)
+                        )
                     )
                     st.plotly_chart(fig_heatmap_calls, use_container_width=True)
                 
@@ -554,22 +991,33 @@ if st.session_state['data']:
                         z=iv_matrix_puts,
                         x=[exp[:10] for exp in all_expirations],
                         y=[f"${s:.0f}" for s in all_strikes],
-                        colorscale='Reds',
-                        colorbar=dict(title='Put IV'),
-                        text=[[f"{val:.2%}" if val else "" for val in row] for row in iv_matrix_puts],
-                        texttemplate='%{text}',
-                        textfont={"size": 8},
-                        hovertemplate='Strike: %{y}<br>Expiry: %{x}<br>IV: %{z:.2%}<extra></extra>'
+                        colorscale=heatmap_colorscale,
+                        colorbar=dict(
+                            title=dict(text='Put IV (%)', font=dict(color=axis_title_color)),
+                            tickfont=dict(color=tick_color),
+                            tickformat='.0f',
+                            ticksuffix='%'
+                        ),
+                        hovertemplate='Strike: %{y}<br>Expiry: %{x}<br>IV: %{z:.1f}%<extra></extra>'
                     ))
                     fig_heatmap_puts.update_layout(
                         title='Put IV Heatmap',
                         template=chart_template,
                         height=600,
-                        yaxis_title='Strike Price',
+                        yaxis_title='Strike Price ($)',
                         xaxis_title='Expiration Date',
                         plot_bgcolor=plot_bg_color,
                         paper_bgcolor=paper_bg_color,
-                        font=dict(color=font_color)
+                        font=dict(color=text_color),
+                        title_font=dict(color=text_color),
+                        xaxis=dict(
+                            title_font=dict(color=axis_title_color),
+                            tickfont=dict(color=tick_color)
+                        ),
+                        yaxis=dict(
+                            title_font=dict(color=axis_title_color),
+                            tickfont=dict(color=tick_color)
+                        )
                     )
                     st.plotly_chart(fig_heatmap_puts, use_container_width=True)
     
@@ -627,9 +1075,9 @@ if st.session_state['data']:
             if len(all_dates) > 1:
                 col_date1, col_date2 = st.columns(2)
                 with col_date1:
-                    start_date_idx = st.selectbox("Start Date", range(len(all_dates)), format_func=lambda x: all_dates[x], key="start_date")
+                    start_date_idx = st.selectbox("Start Date", range(len(all_dates)), format_func=lambda x: all_dates[x], key="start_date", help=get_tooltip("Start Date"))
                 with col_date2:
-                    end_date_idx = st.selectbox("End Date", range(len(all_dates)), format_func=lambda x: all_dates[x], key="end_date", index=len(all_dates)-1)
+                    end_date_idx = st.selectbox("End Date", range(len(all_dates)), format_func=lambda x: all_dates[x], key="end_date", index=len(all_dates)-1, help=get_tooltip("End Date"))
                 date_range = all_dates[start_date_idx:end_date_idx+1]
             else:
                 date_range = all_dates
@@ -657,7 +1105,8 @@ if st.session_state['data']:
                     ["Strike Price", "Expiration Date"],
                     horizontal=True,
                     key="x_axis_range_analysis",
-                    index=0
+                    index=0,
+                    help=get_tooltip("X-Axis")
                 )
             else:
                 x_axis_option = "Strike Price"
@@ -727,14 +1176,14 @@ if st.session_state['data']:
                     y=call_oi_values,
                     name='Call OI',
                     marker_color=call_color,
-                    opacity=0.7
+                    opacity=1.0
                 ))
                 fig_oi.add_trace(go.Bar(
                     x=all_x_values,
                     y=[-oi for oi in put_oi_values],  # Negative for below
                     name='Put OI',
                     marker_color=put_color,
-                    opacity=0.7
+                    opacity=1.0
                 ))
                 fig_oi.update_layout(
                     barmode='overlay',
@@ -747,11 +1196,21 @@ if st.session_state['data']:
                     hovermode='x unified',
                     plot_bgcolor=plot_bg_color,
                     paper_bgcolor=paper_bg_color,
-                    font=dict(color=font_color)
+                    font=dict(color=text_color),
+                    title_font=dict(color=text_color),
+                    xaxis=dict(
+                        title_font=dict(color=axis_title_color),
+                        tickfont=dict(color=tick_color)
+                    ),
+                    yaxis=dict(
+                        title_font=dict(color=axis_title_color),
+                        tickfont=dict(color=tick_color)
+                    ),
+                    legend=dict(font=dict(color=legend_color))
                 )
                 if x_axis_option == "Expiration Date":
                     fig_oi.update_layout(xaxis=dict(tickangle=-45))
-                st.plotly_chart(fig_oi, use_container_width=True)
+                st.plotly_chart(fig_oi, use_container_width=True, key=f"oi_range_{x_axis_option}")
                 
                 # Volume Chart (full width)
                 st.markdown("**Volume**")
@@ -761,14 +1220,14 @@ if st.session_state['data']:
                     y=call_vol_values,
                     name='Call Volume',
                     marker_color=call_color,
-                    opacity=0.7
+                    opacity=1.0
                 ))
                 fig_vol.add_trace(go.Bar(
                     x=all_x_values,
                     y=[-vol for vol in put_vol_values],  # Negative for below
                     name='Put Volume',
                     marker_color=put_color,
-                    opacity=0.7
+                    opacity=1.0
                 ))
                 fig_vol.update_layout(
                     barmode='overlay',
@@ -781,11 +1240,25 @@ if st.session_state['data']:
                     hovermode='x unified',
                     plot_bgcolor=plot_bg_color,
                     paper_bgcolor=paper_bg_color,
-                    font=dict(color=font_color)
+                    font=dict(color=text_color),
+                    title_font=dict(color=text_color),
+                    xaxis=dict(
+                        title_font=dict(color=axis_title_color),
+                        tickfont=dict(color=tick_color)
+                    ),
+                    yaxis=dict(
+                        title_font=dict(color=axis_title_color),
+                        tickfont=dict(color=tick_color)
+                    ),
+                    legend=dict(font=dict(color=legend_color))
                 )
                 if x_axis_option == "Expiration Date":
                     fig_vol.update_layout(xaxis=dict(tickangle=-45))
-                st.plotly_chart(fig_vol, use_container_width=True)
+                st.plotly_chart(fig_vol, use_container_width=True, key=f"vol_range_{x_axis_option}")
+                
+                # Add synchronization script for OI and Volume range charts
+                sync_ids_oi_vol = [f"oi_range_{x_axis_option}", f"vol_range_{x_axis_option}"]
+                components.html(create_sync_script(sync_ids_oi_vol, sync_key='x'), height=0)
             
             # --- Selected Date Drill-Down Section ---
             if not df_range.empty:
@@ -796,7 +1269,8 @@ if st.session_state['data']:
                 selected_date = st.selectbox(
                     "Select Expiration Date to View Strike Distribution",
                     sorted_dates,
-                    key="selected_exp_date_oi"
+                    key="selected_exp_date_oi",
+                    help=get_tooltip("Selected Date")
                 )
                 
                 # Filter data for selected date
@@ -831,14 +1305,14 @@ if st.session_state['data']:
                             y=call_oi_values,
                             name='Call OI',
                             marker_color=call_color,
-                            opacity=0.7
+                            opacity=1.0
                         ))
                         fig_oi_by_strike.add_trace(go.Bar(
                             x=all_strikes,
                             y=[-oi for oi in put_oi_values],  # Negative for below
                             name='Put OI',
                             marker_color=put_color,
-                            opacity=0.7
+                            opacity=1.0
                         ))
                         fig_oi_by_strike.update_layout(
                             title=f'Open Interest by Strike ({selected_date})',
@@ -851,9 +1325,19 @@ if st.session_state['data']:
                             hovermode='x unified',
                             plot_bgcolor=plot_bg_color,
                             paper_bgcolor=paper_bg_color,
-                            font=dict(color=font_color)
+                            font=dict(color=text_color),
+                            title_font=dict(color=text_color),
+                            xaxis=dict(
+                                title_font=dict(color=axis_title_color),
+                                tickfont=dict(color=tick_color)
+                            ),
+                            yaxis=dict(
+                                title_font=dict(color=axis_title_color),
+                                tickfont=dict(color=tick_color)
+                            ),
+                            legend=dict(font=dict(color=legend_color))
                         )
-                        st.plotly_chart(fig_oi_by_strike, use_container_width=True)
+                        st.plotly_chart(fig_oi_by_strike, use_container_width=True, key=f"oi_strike_{selected_date}")
                     
                     with col_vol:
                         st.markdown("**Volume by Strike**")
@@ -863,14 +1347,14 @@ if st.session_state['data']:
                             y=call_vol_values,
                             name='Call Volume',
                             marker_color=call_color,
-                            opacity=0.7
+                            opacity=1.0
                         ))
                         fig_vol_by_strike.add_trace(go.Bar(
                             x=all_strikes,
                             y=[-vol for vol in put_vol_values],  # Negative for below
                             name='Put Volume',
                             marker_color=put_color,
-                            opacity=0.7
+                            opacity=1.0
                         ))
                         fig_vol_by_strike.update_layout(
                             title=f'Volume by Strike ({selected_date})',
@@ -883,9 +1367,23 @@ if st.session_state['data']:
                             hovermode='x unified',
                             plot_bgcolor=plot_bg_color,
                             paper_bgcolor=paper_bg_color,
-                            font=dict(color=font_color)
+                            font=dict(color=text_color),
+                            title_font=dict(color=text_color),
+                            xaxis=dict(
+                                title_font=dict(color=axis_title_color),
+                                tickfont=dict(color=tick_color)
+                            ),
+                            yaxis=dict(
+                                title_font=dict(color=axis_title_color),
+                                tickfont=dict(color=tick_color)
+                            ),
+                            legend=dict(font=dict(color=legend_color))
                         )
-                        st.plotly_chart(fig_vol_by_strike, use_container_width=True)
+                        st.plotly_chart(fig_vol_by_strike, use_container_width=True, key=f"vol_strike_{selected_date}")
+                    
+                    # Add synchronization script for OI and Volume selected date charts
+                    sync_ids_oi_vol_strike = [f"oi_strike_{selected_date}", f"vol_strike_{selected_date}"]
+                    components.html(create_sync_script(sync_ids_oi_vol_strike, sync_key='x'), height=0)
                     
                     # Add Greeks Slice Analysis
                     st.markdown("---")
@@ -909,52 +1407,109 @@ if st.session_state['data']:
                         - **Trading Application:** Sellers profit from Theta decay, buyers need stock movement to overcome time decay.
                         """)
                     
-                    selected_type = st.radio("Option Type", ["call", "put"], horizontal=True, key="greeks_type_selected_date")
+                    selected_type = st.radio("Option Type", ["call", "put"], horizontal=True, key="greeks_type_selected_date", help=get_tooltip("Option Type"))
                     
                     # Filter data for selected date and type
                     filtered_df = selected_date_data[selected_date_data['type'] == selected_type].sort_values('strike')
                     
                     if not filtered_df.empty:
+                        # Store strike prices for synchronization
+                        strikes_list = filtered_df['strike'].tolist()
+                        
                         col_g1, col_g2, col_g3 = st.columns(3)
                         with col_g1:
-                            fig_delta = go.Figure(go.Scatter(x=filtered_df['strike'], y=filtered_df['delta'], mode='lines', name='Delta'))
+                            fig_delta = go.Figure(go.Scatter(
+                                x=filtered_df['strike'], 
+                                y=filtered_df['delta'], 
+                                mode='lines', 
+                                name='Delta',
+                                hovertemplate='Strike: $%{x:,.0f}<br>Delta: %{y:.4f}<extra></extra>',
+                                customdata=strikes_list
+                            ))
                             fig_delta.update_layout(
                                 title="Delta",
                                 template=chart_template,
                                 height=350,
                                 xaxis_title='Strike Price ($)',
-                                yaxis_title='Delta',
+                                yaxis_title='Delta (Price Sensitivity)',
                                 plot_bgcolor=plot_bg_color,
                                 paper_bgcolor=paper_bg_color,
-                                font=dict(color=font_color)
+                                font=dict(color=text_color),
+                                title_font=dict(color=text_color),
+                                xaxis=dict(
+                                    title_font=dict(color=axis_title_color),
+                                    tickfont=dict(color=tick_color)
+                                ),
+                                yaxis=dict(
+                                    title_font=dict(color=axis_title_color),
+                                    tickfont=dict(color=tick_color)
+                                ),
+                                legend=dict(font=dict(color=legend_color))
                             )
-                            st.plotly_chart(fig_delta, use_container_width=True)
+                            st.plotly_chart(fig_delta, use_container_width=True, key=f"delta_chart_{selected_date}")
                         with col_g2:
-                            fig_gamma = go.Figure(go.Scatter(x=filtered_df['strike'], y=filtered_df['gamma'], mode='lines', name='Gamma'))
+                            fig_gamma = go.Figure(go.Scatter(
+                                x=filtered_df['strike'], 
+                                y=filtered_df['gamma'], 
+                                mode='lines', 
+                                name='Gamma',
+                                hovertemplate='Strike: $%{x:,.0f}<br>Gamma: %{y:.6f}<extra></extra>',
+                                customdata=strikes_list
+                            ))
                             fig_gamma.update_layout(
                                 title="Gamma",
                                 template=chart_template,
                                 height=350,
                                 xaxis_title='Strike Price ($)',
-                                yaxis_title='Gamma',
+                                yaxis_title='Gamma (Delta Sensitivity)',
                                 plot_bgcolor=plot_bg_color,
                                 paper_bgcolor=paper_bg_color,
-                                font=dict(color=font_color)
+                                font=dict(color=text_color),
+                                title_font=dict(color=text_color),
+                                xaxis=dict(
+                                    title_font=dict(color=axis_title_color),
+                                    tickfont=dict(color=tick_color)
+                                ),
+                                yaxis=dict(
+                                    title_font=dict(color=axis_title_color),
+                                    tickfont=dict(color=tick_color)
+                                ),
+                                legend=dict(font=dict(color=legend_color))
                             )
-                            st.plotly_chart(fig_gamma, use_container_width=True)
+                            st.plotly_chart(fig_gamma, use_container_width=True, key=f"gamma_chart_{selected_date}")
                         with col_g3:
-                            fig_theta = go.Figure(go.Bar(x=filtered_df['strike'], y=filtered_df['theta'], name='Theta'))
+                            fig_theta = go.Figure(go.Bar(
+                                x=filtered_df['strike'], 
+                                y=filtered_df['theta'], 
+                                name='Theta',
+                                hovertemplate='Strike: $%{x:,.0f}<br>Theta: $%{y:.4f}/day<extra></extra>',
+                                customdata=strikes_list
+                            ))
                             fig_theta.update_layout(
                                 title="Theta",
                                 template=chart_template,
                                 height=350,
                                 xaxis_title='Strike Price ($)',
-                                yaxis_title='Theta',
+                                yaxis_title='Theta ($/day)',
                                 plot_bgcolor=plot_bg_color,
                                 paper_bgcolor=paper_bg_color,
-                                font=dict(color=font_color)
+                                font=dict(color=text_color),
+                                title_font=dict(color=text_color),
+                                xaxis=dict(
+                                    title_font=dict(color=axis_title_color),
+                                    tickfont=dict(color=tick_color)
+                                ),
+                                yaxis=dict(
+                                    title_font=dict(color=axis_title_color),
+                                    tickfont=dict(color=tick_color)
+                                ),
+                                legend=dict(font=dict(color=legend_color))
                             )
-                            st.plotly_chart(fig_theta, use_container_width=True)
+                            st.plotly_chart(fig_theta, use_container_width=True, key=f"theta_chart_{selected_date}")
+                        
+                        # Add synchronization script for Greek charts
+                        sync_ids = [f"delta_chart_{selected_date}", f"gamma_chart_{selected_date}", f"theta_chart_{selected_date}"]
+                        components.html(create_sync_script(sync_ids, sync_key='x'), height=0)
 
 else:
     st.info("Enter a ticker symbol and click 'Analyze' to begin.")
