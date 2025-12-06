@@ -5,13 +5,27 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
 # external
+import logging
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from scipy.stats import norm
+
+# --- LOGGING SETUP ---
+# This ensures you see ALL errors in your terminal
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+# Verify logger is working
+logger.info("Application starting... Logging enabled.")
 
 # internal
 
@@ -1479,7 +1493,7 @@ if st.session_state['data']:
                     
                     # Add Greeks Slice Analysis
                     st.markdown("---")
-                    st.markdown("#### Greeks Slice Analysis")
+                    st.markdown("#### Greeks Slice Analysis (Synced)")
                     with st.expander("How to Use This Chart", expanded=False):
                         st.markdown("""
                         The Greeks measure the risk of a specific options contract at different strike prices.
@@ -1505,93 +1519,113 @@ if st.session_state['data']:
                     filtered_df = selected_date_data[selected_date_data['type'] == selected_type].sort_values('strike')
                     
                     if not filtered_df.empty:
-                        col_g1, col_g2, col_g3 = st.columns(3)
-                        with col_g1:
-                            fig_delta = go.Figure(go.Scatter(
-                                x=filtered_df['strike'], 
-                                y=filtered_df['delta'], 
-                                mode='lines', 
-                                name='Delta',
-                                hovertemplate='Strike: $%{x:,.0f}<br>Delta: %{y:.4f}<extra></extra>'
-                            ))
-                            fig_delta.update_layout(
-                                title="Delta",
+                        logger.debug(f"Generating synced Greek charts for {selected_date}...")
+                        
+                        try:
+                            # 1. Create Subplots: 1 Row, 3 Columns
+                            # shared_xaxes=True is the magic switch that links the hover interaction
+                            fig_greeks = make_subplots(
+                                rows=1, 
+                                cols=3, 
+                                shared_xaxes=True, 
+                                subplot_titles=("Delta", "Gamma", "Theta"),
+                                horizontal_spacing=0.05
+                            )
+
+                            # 2. Add DELTA to Column 1 (Blue)
+                            fig_greeks.add_trace(
+                                go.Scatter(
+                                    x=filtered_df['strike'], 
+                                    y=filtered_df['delta'], 
+                                    mode='lines', 
+                                    name='Delta',
+                                    line=dict(color='#1f77b4'),
+                                    # Note the use of <extra></extra> to hide the trace name in the tooltip
+                                    hovertemplate='<b>Delta</b><br>Strike: $%{x:,.0f}<br>Value: %{y:.4f}<extra></extra>'
+                                ),
+                                row=1, col=1
+                            )
+
+                            # 3. Add GAMMA to Column 2 (Orange)
+                            fig_greeks.add_trace(
+                                go.Scatter(
+                                    x=filtered_df['strike'], 
+                                    y=filtered_df['gamma'], 
+                                    mode='lines', 
+                                    name='Gamma',
+                                    line=dict(color='#ff7f0e'),
+                                    hovertemplate='<b>Gamma</b><br>Strike: $%{x:,.0f}<br>Value: %{y:.6f}<extra></extra>'
+                                ),
+                                row=1, col=2
+                            )
+
+                            # 4. Add THETA to Column 3 (Green)
+                            fig_greeks.add_trace(
+                                go.Bar(
+                                    x=filtered_df['strike'], 
+                                    y=filtered_df['theta'], 
+                                    name='Theta',
+                                    marker_color='#2ca02c',
+                                    hovertemplate='<b>Theta</b><br>Strike: $%{x:,.0f}<br>Value: %{y:.4f}<extra></extra>'
+                                ),
+                                row=1, col=3
+                            )
+
+                            # 5. Native Synchronization Settings
+                            fig_greeks.update_layout(
                                 template=chart_template,
-                                height=350,
-                                xaxis_title='Strike Price ($)',
-                                yaxis_title='Delta (Price Sensitivity)',
+                                height=400,
+                                # 'x unified' creates the crosshair that slices through ALL subplots
+                                hovermode='x unified', 
+                                showlegend=False,
                                 plot_bgcolor=plot_bg_color,
                                 paper_bgcolor=paper_bg_color,
                                 font=dict(color=text_color),
                                 title_font=dict(color=text_color),
-                                xaxis=dict(
-                                    title_font=dict(color=axis_title_color),
-                                    tickfont=dict(color=tick_color)
-                                ),
-                                yaxis=dict(
-                                    title_font=dict(color=axis_title_color),
-                                    tickfont=dict(color=tick_color)
-                                ),
-                                legend=dict(font=dict(color=legend_color))
                             )
-                            st.plotly_chart(fig_delta, use_container_width=True, key=delta_selected_key)
-                        with col_g2:
-                            fig_gamma = go.Figure(go.Scatter(
-                                x=filtered_df['strike'], 
-                                y=filtered_df['gamma'], 
-                                mode='lines', 
-                                name='Gamma',
-                                hovertemplate='Strike: $%{x:,.0f}<br>Gamma: %{y:.6f}<extra></extra>'
-                            ))
-                            fig_gamma.update_layout(
-                                title="Gamma",
-                                template=chart_template,
-                                height=350,
-                                xaxis_title='Strike Price ($)',
-                                yaxis_title='Gamma (Delta Sensitivity)',
-                                plot_bgcolor=plot_bg_color,
-                                paper_bgcolor=paper_bg_color,
-                                font=dict(color=text_color),
-                                title_font=dict(color=text_color),
-                                xaxis=dict(
-                                    title_font=dict(color=axis_title_color),
-                                    tickfont=dict(color=tick_color)
-                                ),
-                                yaxis=dict(
-                                    title_font=dict(color=axis_title_color),
-                                    tickfont=dict(color=tick_color)
-                                ),
-                                legend=dict(font=dict(color=legend_color))
+
+                            # 6. Uniform Axis Labels
+                            fig_greeks.update_xaxes(
+                                title_text="Strike Price ($)", 
+                                title_font=dict(color=axis_title_color), 
+                                tickfont=dict(color=tick_color),
+                                showgrid=True,
+                                gridcolor=grid_color
                             )
-                            st.plotly_chart(fig_gamma, use_container_width=True, key=gamma_selected_key)
-                        with col_g3:
-                            fig_theta = go.Figure(go.Bar(
-                                x=filtered_df['strike'], 
-                                y=filtered_df['theta'], 
-                                name='Theta',
-                                hovertemplate='Strike: $%{x:,.0f}<br>Theta: $%{y:.4f}/day<extra></extra>'
-                            ))
-                            fig_theta.update_layout(
-                                title="Theta",
-                                template=chart_template,
-                                height=350,
-                                xaxis_title='Strike Price ($)',
-                                yaxis_title='Theta ($/day)',
-                                plot_bgcolor=plot_bg_color,
-                                paper_bgcolor=paper_bg_color,
-                                font=dict(color=text_color),
-                                title_font=dict(color=text_color),
-                                xaxis=dict(
-                                    title_font=dict(color=axis_title_color),
-                                    tickfont=dict(color=tick_color)
-                                ),
-                                yaxis=dict(
-                                    title_font=dict(color=axis_title_color),
-                                    tickfont=dict(color=tick_color)
-                                ),
-                                legend=dict(font=dict(color=legend_color))
+                            # Individual y-axis titles for each subplot
+                            fig_greeks.update_yaxes(
+                                title_text="Delta (Price Sensitivity)",
+                                title_font=dict(color=axis_title_color),
+                                tickfont=dict(color=tick_color),
+                                showgrid=True,
+                                gridcolor=grid_color,
+                                row=1, col=1
                             )
-                            st.plotly_chart(fig_theta, use_container_width=True, key=theta_selected_key)
+                            fig_greeks.update_yaxes(
+                                title_text="Gamma (Delta Sensitivity)",
+                                title_font=dict(color=axis_title_color),
+                                tickfont=dict(color=tick_color),
+                                showgrid=True,
+                                gridcolor=grid_color,
+                                row=1, col=2
+                            )
+                            fig_greeks.update_yaxes(
+                                title_text="Theta ($/day)",
+                                title_font=dict(color=axis_title_color),
+                                tickfont=dict(color=tick_color),
+                                showgrid=True,
+                                gridcolor=grid_color,
+                                row=1, col=3
+                            )
+
+                            # 7. Render
+                            st.plotly_chart(fig_greeks, use_container_width=True, key="greeks_synced_chart")
+                            logger.info("Greek charts rendered successfully.")
+
+                        except Exception as e:
+                            # This captures the error in your terminal so you can fix data issues
+                            logger.error(f"Failed to render Greek charts: {str(e)}", exc_info=True)
+                            st.error(f"Chart Error: {str(e)}")
                         
                         # HARDCODED hover sync for Selected Date OI/Volume charts
                         # Uses polling + data-based detection (3rd and 4th 2-trace bar charts)
@@ -1691,83 +1725,103 @@ if st.session_state['data']:
                         """
                         components.html(selected_oi_vol_hover_sync, height=0)
                         
-                        # HARDCODED hover sync for Greeks charts (Delta, Gamma, Theta)
-                        # Key-based lookup (data-testid contains the chart key), falls back to title
+                        # Hover sync for Greeks charts (Delta, Gamma, Theta) - hard-coded IDs + x-value matching
                         greeks_hover_sync = """
                         <script>
                         (function() {
-                            const rootDoc = (window.parent && window.parent.document) ? window.parent.document : document;
+                            const parentDoc = (window.parent && window.parent.document) ? window.parent.document : document;
+                            const Plotly = (window.parent && window.parent.Plotly) ? window.parent.Plotly : window.Plotly;
+                            if (!Plotly) return;
+
                             let isHovering = false;
-                            let deltaChart = null, gammaChart = null, thetaChart = null;
-                            let lastKey = "";
 
-                            const deltaKey = "delta-selected-chart";
-                            const gammaKey = "gamma-selected-chart";
-                            const thetaKey = "theta-selected-chart";
+                            const TARGET_IDS = {
+                                DELTA: 'chart_delta_unique',
+                                GAMMA: 'chart_gamma_unique',
+                                THETA: 'chart_theta_unique'
+                            };
 
-                            function findByKey(key) {
-                                const container = rootDoc.querySelector(`[data-testid*="${key}"]`);
-                                if (container) {
-                                    const plot = container.querySelector('.js-plotly-plot');
-                                    if (plot && plot.data && plot.data[0] && plot.data[0].x) return plot;
-                                }
-                                return null;
+                            function log(msg) { console.log('[HardSync] ' + msg); }
+
+                            function findSpecificCharts() {
+                                const allPlots = Array.from(parentDoc.querySelectorAll('.js-plotly-plot'));
+                                const found = { delta: null, gamma: null, theta: null };
+                                allPlots.forEach(plot => {
+                                    const id = plot?.layout?.meta?.hard_id;
+                                    if (!id) return;
+                                    if (id === TARGET_IDS.DELTA) found.delta = plot;
+                                    if (id === TARGET_IDS.GAMMA) found.gamma = plot;
+                                    if (id === TARGET_IDS.THETA) found.theta = plot;
+                                });
+                                return found;
                             }
 
-                            function findByTitle(title) {
-                                const charts = Array.from(rootDoc.querySelectorAll('.js-plotly-plot'));
-                                for (const c of charts) {
-                                    const t = c.querySelector('.gtitle');
-                                    if (t && t.textContent.trim() === title && c.data && c.data[0] && c.data[0].x) return c;
-                                }
-                                return null;
-                            }
-
-                            function bindIfNeeded() {
-                                const d = findByKey(deltaKey) || findByTitle('Delta');
-                                const g = findByKey(gammaKey) || findByTitle('Gamma');
-                                const t = findByKey(thetaKey) || findByTitle('Theta');
-                                if (!d || !g || !t) return;
-
-                                const key = `${d}_${g}_${t}_${(d.data[0].x||[]).length}_${(g.data[0].x||[]).length}_${(t.data[0].x||[]).length}`;
-                                if (key === lastKey) return;
-                                lastKey = key;
-
-                                deltaChart = d; gammaChart = g; thetaChart = t;
-                                console.log('Greeks hover sync bound (key-based)');
-
-                                function sync(src, pointNum, targets) {
-                                    const Plotly = window.parent.Plotly || window.Plotly;
-                                    if (!Plotly) return;
-                                    targets.forEach(ch => {
-                                        if (!ch || ch === src || !ch.data || !ch.data[0] || !ch.data[0].x) return;
-                                        if ((ch.data[0].x||[]).length > pointNum) {
-                                            try { Plotly.Fx.hover(ch, [{curveNumber:0, pointNumber:pointNum}]); } catch(e){}
-                                        }
+                            function findIndexByStrikePrice(chart, strikePrice) {
+                                if (!chart?.data || !chart.data.length) return null;
+                                const xData = chart.data[0].x || [];
+                                let idx = xData.findIndex(val => Math.abs(+val - +strikePrice) < 0.01);
+                                if (idx === -1) {
+                                    // nearest fallback
+                                    let best = -1, diff = Infinity;
+                                    xData.forEach((v, i) => {
+                                        const d = Math.abs(+v - +strikePrice);
+                                        if (!Number.isNaN(d) && d < diff) { diff = d; best = i; }
                                     });
+                                    idx = best;
                                 }
-                                function unhover(except) {
-                                    const Plotly = window.parent.Plotly || window.Plotly;
-                                    if (!Plotly) return;
-                                    [deltaChart, gammaChart, thetaChart].forEach(ch => {
-                                        if (ch && ch !== except) { try { Plotly.Fx.unhover(ch); } catch(e){} }
-                                    });
-                                }
-
-                                deltaChart.on('plotly_hover', ev => { if (isHovering || !ev.points?.[0]) return; isHovering=true; sync(deltaChart, ev.points[0].pointNumber, [gammaChart, thetaChart]); setTimeout(()=>isHovering=false,50); });
-                                gammaChart.on('plotly_hover', ev => { if (isHovering || !ev.points?.[0]) return; isHovering=true; sync(gammaChart, ev.points[0].pointNumber, [deltaChart, thetaChart]); setTimeout(()=>isHovering=false,50); });
-                                thetaChart.on('plotly_hover', ev => { if (isHovering || !ev.points?.[0]) return; isHovering=true; sync(thetaChart, ev.points[0].pointNumber, [deltaChart, gammaChart]); setTimeout(()=>isHovering=false,50); });
-
-                                deltaChart.on('plotly_unhover', ()=>unhover(deltaChart));
-                                gammaChart.on('plotly_unhover', ()=>unhover(gammaChart));
-                                thetaChart.on('plotly_unhover', ()=>unhover(thetaChart));
+                                return idx >= 0 ? idx : null;
                             }
 
-                            function tick(attempt=0) {
-                                bindIfNeeded();
-                                if (attempt < 120) setTimeout(()=>tick(attempt+1), 500); // up to ~60s
+                            function executeSync(sourceChart, eventData) {
+                                if (isHovering || !eventData?.points?.length) return;
+                                isHovering = true;
+                                const strikePrice = eventData.points[0].x;
+                                const charts = findSpecificCharts();
+                                const targets = [charts.delta, charts.gamma, charts.theta].filter(c => c && c !== sourceChart);
+                                targets.forEach(target => {
+                                    const targetIdx = findIndexByStrikePrice(target, strikePrice);
+                                    if (targetIdx !== null) {
+                                        try {
+                                            Plotly.Fx.hover(target, [{ curveNumber: 0, pointNumber: targetIdx }]);
+                                        } catch(e) { console.error(e); }
+                                    }
+                                });
+                                setTimeout(() => { isHovering = false; }, 20);
                             }
-                            setTimeout(()=>tick(0), 500);
+
+                            function executeUnhover(sourceChart) {
+                                const charts = findSpecificCharts();
+                                const targets = [charts.delta, charts.gamma, charts.theta].filter(c => c && c !== sourceChart);
+                                targets.forEach(target => {
+                                    try { Plotly.Fx.unhover(target); } catch(e) {}
+                                });
+                            }
+
+                            function bindListeners() {
+                                const charts = findSpecificCharts();
+                                const chartList = [charts.delta, charts.gamma, charts.theta].filter(c => c);
+                                if (!chartList.length) return;
+                                chartList.forEach(chart => {
+                                    if (chart._hardSyncBound) return;
+                                    if (chart.removeAllListeners) {
+                                        chart.removeAllListeners('plotly_hover');
+                                        chart.removeAllListeners('plotly_unhover');
+                                    }
+                                    log('Binding listener to: ' + (chart?.layout?.meta?.hard_id || 'unknown'));
+                                    chart.on('plotly_hover', data => executeSync(chart, data));
+                                    chart.on('plotly_unhover', () => executeUnhover(chart));
+                                    chart._hardSyncBound = true;
+                                });
+                            }
+
+                            function startMonitoring() {
+                                log('Starting Hard-Sync Monitor');
+                                bindListeners();
+                                const observer = new MutationObserver(() => { bindListeners(); });
+                                observer.observe(parentDoc.body, { childList: true, subtree: true });
+                            }
+
+                            setTimeout(startMonitoring, 1000);
                         })();
                         </script>
                         """
