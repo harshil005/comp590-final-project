@@ -138,171 +138,6 @@ def create_xaxis_sync_script(chart_keys: list) -> str:
     """
     return script
 
-def create_hover_sync_script(chart_keys: list) -> str:
-    """
-    Creates JavaScript to synchronize hover events between charts.
-    When hovering on one chart, highlights the same x-value on other charts.
-    Improved version for line and bar charts with better matching.
-    
-    Args:
-        chart_keys: List of Streamlit chart keys to synchronize
-        
-    Returns:
-        HTML string containing JavaScript code
-    """
-    script = f"""
-    <script>
-    (function() {{
-        const chartKeys = {chart_keys};
-        // Support Streamlit iframe embedding by targeting parent document when available
-        const rootDoc = (window.parent && window.parent.document) ? window.parent.document : document;
-        let hoverTimeout;
-        let isHovering = false;
-        
-        function findChartDiv(key) {{
-            // Try multiple strategies to find the chart
-            // Strategy 1: Look for data-testid containing the key
-            let div = rootDoc.querySelector(`[data-testid*="${{key}}"]`);
-            if (div) {{
-                let plotlyDiv = div.querySelector('.js-plotly-plot');
-                if (plotlyDiv && plotlyDiv.data) return plotlyDiv;
-            }}
-            
-            // Strategy 2: Look for stPlotlyChart with key attribute
-            div = rootDoc.querySelector(`[data-testid="stPlotlyChart"]`);
-            if (div) {{
-                // Find all plotly charts and match by checking nearby elements
-                const allCharts = rootDoc.querySelectorAll('.js-plotly-plot');
-                for (let chart of allCharts) {{
-                    // Check if this chart is near a container that might have our key
-                    let parent = chart.closest('[data-testid]');
-                    if (parent && parent.getAttribute('data-testid').includes(key)) {{
-                        if (chart.data) return chart;
-                    }}
-                }}
-            }}
-            
-            return null;
-        }}
-
-        // Fallback: map charts by their order of appearance when keys are missing in DOM
-        function mapChartsByOrder() {{
-            const allCharts = Array.from(rootDoc.querySelectorAll('.js-plotly-plot'));
-            if (allCharts.length >= chartKeys.length) {{
-                const lastCharts = allCharts.slice(-chartKeys.length);
-                return lastCharts.map((div, idx) => ({{
-                    key: chartKeys[idx],
-                    div: div,
-                    index: idx
-                }}));
-            }}
-            return [];
-        }}
-        
-        function waitForCharts() {{
-            const charts = [];
-            chartKeys.forEach((key, index) => {{
-                const plotlyDiv = findChartDiv(key);
-                if (plotlyDiv && plotlyDiv.data && plotlyDiv.data.length > 0) {{
-                    charts.push({{key: key, div: plotlyDiv, index: index}});
-                }}
-            }});
-            
-            // If direct lookup failed, fall back to ordered mapping
-            if (charts.length !== chartKeys.length) {{
-                const orderedCharts = mapChartsByOrder();
-                if (orderedCharts.length === chartKeys.length) {{
-                    console.log('Falling back to ordered chart mapping for hover sync');
-                    setupHoverSync(orderedCharts);
-                    return;
-                }}
-            }}
-
-            // If we found all charts, set them up
-            if (charts.length === chartKeys.length) {{
-                console.log('Found all charts for hover sync:', charts.map(c => c.key));
-                setupHoverSync(charts);
-            }} else {{
-                // Try again after a delay
-                setTimeout(waitForCharts, 200);
-            }}
-        }}
-        
-        function setupHoverSync(charts) {{
-            console.log('Setting up hover sync for', charts.length, 'charts');
-            
-            charts.forEach(({{key, div}}) => {{
-                console.log('Attaching hover listener to chart:', key);
-                
-                div.on('plotly_hover', function(eventData) {{
-                    if (!eventData || !eventData.points || eventData.points.length === 0) return;
-                    if (isHovering) return;
-                    
-                    clearTimeout(hoverTimeout);
-                    isHovering = true;
-                    const point = eventData.points[0];
-                    const pointNum = point.pointNumber;
-                    const curveNum = point.curveNumber;
-                    
-                    console.log('Hover detected on', key, 'pointNumber:', pointNum, 'x:', point.x);
-                    
-                    // Sync hover to all other charts using pointNumber
-                    charts.forEach(({{div: targetDiv, key: targetKey}}) => {{
-                        if (targetDiv !== div && targetDiv.data && targetDiv.data.length > 0) {{
-                            try {{
-                                // Use the same pointNumber for the first trace (curveNumber: 0)
-                                // Since all charts have the same x-values (strike prices)
-                                if (window.parent && window.parent.Plotly) {{
-                                    window.parent.Plotly.Fx.hover(targetDiv, [
-                                        {{ curveNumber: 0, pointNumber: pointNum }}
-                                    ]);
-                                    console.log('Synced hover to', targetKey, 'pointNumber:', pointNum);
-                                }} else if (window.Plotly) {{
-                                    window.Plotly.Fx.hover(targetDiv, [
-                                        {{ curveNumber: 0, pointNumber: pointNum }}
-                                    ]);
-                                }}
-                            }} catch(e) {{
-                                console.error('Hover sync error on', targetKey, ':', e);
-                            }}
-                        }}
-                    }});
-                    
-                    setTimeout(() => {{ isHovering = false; }}, 100);
-                }});
-                
-                div.on('plotly_unhover', function(eventData) {{
-                    if (hoverTimeout) clearTimeout(hoverTimeout);
-                    // Only clear the isHovering flag, don't force-unhover other charts
-                    // Let natural mouse movement handle unhover on other charts
-                    hoverTimeout = setTimeout(() => {{
-                        isHovering = false;
-                    }}, 300);
-                }});
-            }});
-        }}
-        
-        // Use MutationObserver to detect when charts are added to DOM
-        const observer = new MutationObserver(function(mutations) {{
-            waitForCharts();
-        }});
-        
-        if (rootDoc && rootDoc.body) {{
-            observer.observe(rootDoc.body, {{
-                childList: true,
-                subtree: true
-            }});
-        }}
-        
-        // Also try immediately and after delays
-        waitForCharts();
-        setTimeout(waitForCharts, 500);
-        setTimeout(waitForCharts, 1000);
-        setTimeout(waitForCharts, 2000);
-    }})();
-    </script>
-    """
-    return script
 
 # --- HELPER FUNCTIONS ---
 def calculate_gex_profile(df_greeks: pd.DataFrame, spot_price: float) -> pd.DataFrame:
@@ -569,6 +404,16 @@ if analyze_btn:
 if st.session_state['data']:
     data = st.session_state['data']
     chart_template = "plotly"
+    
+    # Check for clicked date from URL query params (set by JavaScript click handler)
+    query_params = st.query_params
+    if "clicked_date" in query_params:
+        clicked_date_from_url = query_params["clicked_date"]
+        # Store in session state and clear the query param
+        st.session_state['selected_date_from_chart'] = clicked_date_from_url
+        # Clear the query param to avoid re-triggering
+        del st.query_params["clicked_date"]
+        st.rerun()
     
     # Theme-aware colors with color blind support
     is_color_blind = st.session_state.get("color_blind_mode", False)
@@ -897,18 +742,43 @@ if st.session_state['data']:
                 pivot_calls = df_calls.pivot_table(index='strike', columns='expiry', values='iv', aggfunc='mean')
                 pivot_puts = df_puts.pivot_table(index='strike', columns='expiry', values='iv', aggfunc='mean')
                 
-                # Ensure sorted axes
-                pivot_calls = pivot_calls.reindex(index=sorted(pivot_calls.index), columns=sorted(pivot_calls.columns))
-                pivot_puts = pivot_puts.reindex(index=sorted(pivot_puts.index), columns=sorted(pivot_puts.columns))
+                # Create UNIFIED axes for both heatmaps so hover sync works correctly
+                # Union of all strikes and expiries from both calls and puts
+                all_strikes_heatmap = sorted(set(pivot_calls.index.tolist() + pivot_puts.index.tolist()))
+                all_expiries_heatmap = sorted(set(pivot_calls.columns.tolist() + pivot_puts.columns.tolist()))
+                
+                # Reindex both pivots to use the unified axes (fills missing with NaN)
+                pivot_calls = pivot_calls.reindex(index=all_strikes_heatmap, columns=all_expiries_heatmap)
+                pivot_puts = pivot_puts.reindex(index=all_strikes_heatmap, columns=all_expiries_heatmap)
                 
                 # Extract values for Plotly (convert to % and replace NaN with None for clean hover)
                 z_calls = pivot_calls.mul(100).where(~pivot_calls.isna(), None).values.tolist()
                 z_puts = pivot_puts.mul(100).where(~pivot_puts.isna(), None).values.tolist()
                 
-                x_calls = [pd.to_datetime(x).strftime('%Y-%m-%d') if not isinstance(x, str) else x[:10] for x in pivot_calls.columns]
-                x_puts = [pd.to_datetime(x).strftime('%Y-%m-%d') if not isinstance(x, str) else x[:10] for x in pivot_puts.columns]
-                y_calls = [f"${s:.0f}" for s in pivot_calls.index]
-                y_puts = [f"${s:.0f}" for s in pivot_puts.index]
+                # Use unified axes for both heatmaps
+                x_heatmap = [pd.to_datetime(x).strftime('%Y-%m-%d') if not isinstance(x, str) else x[:10] for x in all_expiries_heatmap]
+                y_heatmap = [f"${s:.0f}" for s in all_strikes_heatmap]
+                
+                # Assign to both (same axes for proper hover sync)
+                x_calls = x_heatmap
+                x_puts = x_heatmap
+                y_calls = y_heatmap
+                y_puts = y_heatmap
+                
+                # Calculate shared color range for both heatmaps (so colors are comparable)
+                # Flatten and filter out None values to find min/max
+                all_iv_values = []
+                for row in z_calls:
+                    all_iv_values.extend([v for v in row if v is not None])
+                for row in z_puts:
+                    all_iv_values.extend([v for v in row if v is not None])
+                
+                if all_iv_values:
+                    # Use percentile cap from sidebar settings for outlier handling
+                    iv_min = 0  # IV can't be negative
+                    iv_max = np.percentile(all_iv_values, percentile_cap) if all_iv_values else 100
+                else:
+                    iv_min, iv_max = 0, 100
                 
                 # Create two heatmaps side by side
                 heatmap_col1, heatmap_col2 = st.columns(2)
@@ -919,6 +789,8 @@ if st.session_state['data']:
                         x=x_calls,
                         y=y_calls,
                         colorscale=heatmap_colorscale,
+                        zmin=iv_min,
+                        zmax=iv_max,
                         colorbar=dict(
                             title=dict(text='Call IV (%)', font=dict(color=axis_title_color)),
                             tickfont=dict(color=tick_color),
@@ -946,7 +818,7 @@ if st.session_state['data']:
                             tickfont=dict(color=tick_color)
                         )
                     )
-                    st.plotly_chart(fig_heatmap_calls, use_container_width=True, key="heatmap-call-iv", on_select="rerun", selection_mode="points")
+                    call_heatmap_event = st.plotly_chart(fig_heatmap_calls, use_container_width=True, key="heatmap-call-iv", on_select="rerun", selection_mode="points")
                 
                 with heatmap_col2:
                     fig_heatmap_puts = go.Figure(data=go.Heatmap(
@@ -954,6 +826,8 @@ if st.session_state['data']:
                         x=x_puts,
                         y=y_puts,
                         colorscale=heatmap_colorscale,
+                        zmin=iv_min,
+                        zmax=iv_max,
                         colorbar=dict(
                             title=dict(text='Put IV (%)', font=dict(color=axis_title_color)),
                             tickfont=dict(color=tick_color),
@@ -981,129 +855,160 @@ if st.session_state['data']:
                             tickfont=dict(color=tick_color)
                         )
                     )
-                    st.plotly_chart(fig_heatmap_puts, use_container_width=True, key="heatmap-put-iv", on_select="rerun", selection_mode="points")
+                    put_heatmap_event = st.plotly_chart(fig_heatmap_puts, use_container_width=True, key="heatmap-put-iv", on_select="rerun", selection_mode="points")
                 
                 # Capture selection events from heatmaps to update selected date
-                # Check for selections in call heatmap
-                if "heatmap-call-iv" in st.session_state and st.session_state["heatmap-call-iv"].get("selection", {}).get("points"):
-                    points = st.session_state["heatmap-call-iv"]["selection"]["points"]
-                    if points:
-                        selected_x = points[0].get("x")
-                        # x is expiration date string or timestamp, ensure format
+                # Check for selections in call heatmap using return value
+                if call_heatmap_event and hasattr(call_heatmap_event, 'selection') and call_heatmap_event.selection.points:
+                    points = call_heatmap_event.selection.points
+                    if points and len(points) > 0:
+                        selected_x = points[0].get("x") if isinstance(points[0], dict) else getattr(points[0], "x", None)
                         if selected_x:
-                            # Try to parse if it comes as full datetime string, otherwise assume YYYY-MM-DD
-                             try:
-                                 clicked_date = pd.to_datetime(selected_x).strftime('%Y-%m-%d')
-                                 if clicked_date in all_dates_str:
-                                     st.session_state['selected_date_from_chart'] = clicked_date
-                             except:
-                                 pass
+                            try:
+                                clicked_date = pd.to_datetime(selected_x).strftime('%Y-%m-%d')
+                                if clicked_date in all_dates_str and clicked_date != st.session_state.get('selected_date_from_chart'):
+                                    st.session_state['selected_date_from_chart'] = clicked_date
+                                    st.rerun()
+                            except:
+                                pass
 
-                # Check for selections in put heatmap
-                if "heatmap-put-iv" in st.session_state and st.session_state["heatmap-put-iv"].get("selection", {}).get("points"):
-                    points = st.session_state["heatmap-put-iv"]["selection"]["points"]
-                    if points:
-                        selected_x = points[0].get("x")
+                # Check for selections in put heatmap using return value
+                if put_heatmap_event and hasattr(put_heatmap_event, 'selection') and put_heatmap_event.selection.points:
+                    points = put_heatmap_event.selection.points
+                    if points and len(points) > 0:
+                        selected_x = points[0].get("x") if isinstance(points[0], dict) else getattr(points[0], "x", None)
                         if selected_x:
-                             try:
-                                 clicked_date = pd.to_datetime(selected_x).strftime('%Y-%m-%d')
-                                 if clicked_date in all_dates_str:
-                                     st.session_state['selected_date_from_chart'] = clicked_date
-                             except:
-                                 pass
+                            try:
+                                clicked_date = pd.to_datetime(selected_x).strftime('%Y-%m-%d')
+                                if clicked_date in all_dates_str and clicked_date != st.session_state.get('selected_date_from_chart'):
+                                    st.session_state['selected_date_from_chart'] = clicked_date
+                                    st.rerun()
+                            except:
+                                pass
                 
                 # Inject sync script for heatmaps (sync x-axis)
                 sync_script_heatmaps = create_xaxis_sync_script(["heatmap-call-iv", "heatmap-put-iv"])
                 components.html(sync_script_heatmaps, height=0)
                 
-                # Add specialized hover sync for heatmaps
+                # Add specialized hover sync for heatmaps - uses pointNumber directly since axes are now unified
                 heatmap_hover_sync = """
                 <script>
                 (function() {
-                    const chartKeys = ["heatmap-call-iv", "heatmap-put-iv"];
                     const rootDoc = (window.parent && window.parent.document) ? window.parent.document : document;
+                    let isHovering = false;
+                    let hoverTimeout;
+                    let setupComplete = false;
                     
-                    function findHeatmapDiv(key) {
-                        let div = rootDoc.querySelector(`[data-testid*="${key}"]`);
-                        if (div) {
-                            let plotlyDiv = div.querySelector('.js-plotly-plot');
-                            if (plotlyDiv && plotlyDiv.data) return plotlyDiv;
-                        }
-                        return null;
+                    function findAllPlotlyCharts() {
+                        // Find all plotly charts and return the last two (which should be the heatmaps)
+                        const allCharts = Array.from(rootDoc.querySelectorAll('.js-plotly-plot'));
+                        // Filter to only heatmaps (they have z data)
+                        const heatmaps = allCharts.filter(chart => {
+                            return chart.data && chart.data[0] && chart.data[0].type === 'heatmap';
+                        });
+                        return heatmaps;
                     }
                     
                     function setupHeatmapSync() {
-                        const charts = [];
-                        chartKeys.forEach(key => {
-                            const plotlyDiv = findHeatmapDiv(key);
-                            if (plotlyDiv && plotlyDiv.data && plotlyDiv.data.length > 0) {
-                                charts.push({key: key, div: plotlyDiv});
-                            }
-                        });
+                        if (setupComplete) return;
                         
-                        if (charts.length === chartKeys.length) {
-                            charts.forEach(({key, div}) => {
-                                div.on('plotly_hover', function(eventData) {
-                                    if (!eventData || !eventData.points || eventData.points.length === 0) return;
-                                    
-                                    const point = eventData.points[0];
-                                    const xValue = point.x;
-                                    const yValue = point.y;
-                                    
-                                    // Sync hover to other heatmap using x,y coordinates
-                                    charts.forEach(({div: targetDiv, key: targetKey}) => {
-                                        if (targetDiv !== div && targetDiv.data && targetDiv.data.length > 0) {
-                                            try {
-                                                const data = targetDiv.data[0];
-                                                if (data.x && data.y && data.x.indexOf && data.y.indexOf) {
-                                                    const xIndex = data.x.indexOf(xValue);
-                                                    const yIndex = data.y.indexOf(yValue);
-                                                    if (xIndex >= 0 && yIndex >= 0) {
-                                                        if (window.parent && window.parent.Plotly) {
-                                                            window.parent.Plotly.Fx.hover(targetDiv, [
-                                                                {curveNumber: 0, pointNumber: [xIndex, yIndex]}
-                                                            ]);
-                                                        } else if (window.Plotly) {
-                                                            window.Plotly.Fx.hover(targetDiv, [
-                                                                {curveNumber: 0, pointNumber: [xIndex, yIndex]}
-                                                            ]);
-                                                        }
-                                                    }
-                                                }
-                                            } catch(e) {
-                                                console.error('Heatmap hover sync error:', e);
-                                            }
-                                        }
-                                    });
-                                });
+                        const heatmaps = findAllPlotlyCharts();
+                        console.log('Found heatmaps:', heatmaps.length);
+                        
+                        if (heatmaps.length >= 2) {
+                            setupComplete = true;
+                            const callHeatmap = heatmaps[0];
+                            const putHeatmap = heatmaps[1];
+                            
+                            console.log('Setting up heatmap hover sync between Call and Put IV heatmaps');
+                            
+                            // Sync Call -> Put
+                            callHeatmap.on('plotly_hover', function(eventData) {
+                                if (!eventData || !eventData.points || eventData.points.length === 0) return;
+                                if (isHovering) return;
                                 
-                                div.on('plotly_unhover', function(eventData) {
-                                    // Clear hover on other heatmap after delay
-                                    setTimeout(() => {
-                                        charts.forEach(({div: targetDiv}) => {
-                                            if (targetDiv !== div) {
-                                                try {
-                                                    if (window.parent && window.parent.Plotly) {
-                                                        window.parent.Plotly.Fx.unhover(targetDiv);
-                                                    } else if (window.Plotly) {
-                                                        window.Plotly.Fx.unhover(targetDiv);
-                                                    }
-                                                } catch(e) {
-                                                    console.error('Heatmap unhover sync error:', e);
-                                                }
-                                            }
-                                        });
-                                    }, 300);
-                                });
+                                clearTimeout(hoverTimeout);
+                                isHovering = true;
+                                
+                                const point = eventData.points[0];
+                                // For heatmaps, pointNumber is [xIndex, yIndex] or we can use x/y directly
+                                const pointNum = point.pointNumber;
+                                
+                                try {
+                                    const Plotly = window.parent.Plotly || window.Plotly;
+                                    if (Plotly && putHeatmap.data && putHeatmap.data[0]) {
+                                        // Use the same pointNumber since axes are unified
+                                        Plotly.Fx.hover(putHeatmap, [{
+                                            curveNumber: 0,
+                                            pointNumber: pointNum
+                                        }]);
+                                    }
+                                } catch(e) {
+                                    console.error('Heatmap hover sync error (Call->Put):', e);
+                                }
+                                
+                                setTimeout(() => { isHovering = false; }, 50);
                             });
+                            
+                            // Sync Put -> Call
+                            putHeatmap.on('plotly_hover', function(eventData) {
+                                if (!eventData || !eventData.points || eventData.points.length === 0) return;
+                                if (isHovering) return;
+                                
+                                clearTimeout(hoverTimeout);
+                                isHovering = true;
+                                
+                                const point = eventData.points[0];
+                                const pointNum = point.pointNumber;
+                                
+                                try {
+                                    const Plotly = window.parent.Plotly || window.Plotly;
+                                    if (Plotly && callHeatmap.data && callHeatmap.data[0]) {
+                                        Plotly.Fx.hover(callHeatmap, [{
+                                            curveNumber: 0,
+                                            pointNumber: pointNum
+                                        }]);
+                                    }
+                                } catch(e) {
+                                    console.error('Heatmap hover sync error (Put->Call):', e);
+                                }
+                                
+                                setTimeout(() => { isHovering = false; }, 50);
+                            });
+                            
+                            // Unhover sync
+                            callHeatmap.on('plotly_unhover', function() {
+                                hoverTimeout = setTimeout(() => {
+                                    isHovering = false;
+                                    try {
+                                        const Plotly = window.parent.Plotly || window.Plotly;
+                                        if (Plotly) Plotly.Fx.unhover(putHeatmap);
+                                    } catch(e) {}
+                                }, 100);
+                            });
+                            
+                            putHeatmap.on('plotly_unhover', function() {
+                                hoverTimeout = setTimeout(() => {
+                                    isHovering = false;
+                                    try {
+                                        const Plotly = window.parent.Plotly || window.Plotly;
+                                        if (Plotly) Plotly.Fx.unhover(callHeatmap);
+                                    } catch(e) {}
+                                }, 100);
+                            });
+                            
+                            console.log('Heatmap hover sync setup complete');
                         } else {
-                            setTimeout(setupHeatmapSync, 500);
+                            // Retry
+                            setTimeout(setupHeatmapSync, 300);
                         }
                     }
                     
-                    setupHeatmapSync();
+                    // Multiple attempts to ensure charts are loaded
+                    setTimeout(setupHeatmapSync, 500);
                     setTimeout(setupHeatmapSync, 1000);
                     setTimeout(setupHeatmapSync, 2000);
+                    setTimeout(setupHeatmapSync, 3000);
                 })();
                 </script>
                 """
@@ -1287,7 +1192,7 @@ if st.session_state['data']:
                 )
                 if x_axis_option == "Expiration Date":
                     fig_oi.update_layout(xaxis=dict(tickangle=-45))
-                st.plotly_chart(fig_oi, use_container_width=True, key="oi-range-chart", on_select="rerun", selection_mode="points")
+                oi_event = st.plotly_chart(fig_oi, use_container_width=True, key="oi-range-chart", on_select="rerun", selection_mode="points")
                 
                 # Volume Chart (full width)
                 st.markdown("**Volume**")
@@ -1331,47 +1236,173 @@ if st.session_state['data']:
                 )
                 if x_axis_option == "Expiration Date":
                     fig_vol.update_layout(xaxis=dict(tickangle=-45))
-                st.plotly_chart(fig_vol, use_container_width=True, key="vol-range-chart", on_select="rerun", selection_mode="points")
+                vol_event = st.plotly_chart(fig_vol, use_container_width=True, key="vol-range-chart", on_select="rerun", selection_mode="points")
                 
                 # Capture selection events from Liquidity Range Charts (when X-axis is Expiration Date)
+                # Use the return value from st.plotly_chart which contains the selection data
                 if x_axis_option == "Expiration Date":
-                    # Check OI chart
-                    if "oi-range-chart" in st.session_state and st.session_state["oi-range-chart"].get("selection", {}).get("points"):
-                        points = st.session_state["oi-range-chart"]["selection"]["points"]
-                        if points:
-                            selected_x = points[0].get("x")
+                    # Check OI chart selection from return value
+                    if oi_event and hasattr(oi_event, 'selection') and oi_event.selection.points:
+                        points = oi_event.selection.points
+                        if points and len(points) > 0:
+                            selected_x = points[0].get("x") if isinstance(points[0], dict) else getattr(points[0], "x", None)
                             if selected_x:
                                 try:
                                     clicked_date = pd.to_datetime(selected_x).strftime('%Y-%m-%d')
-                                    if clicked_date in all_dates_str:
+                                    if clicked_date in all_dates_str and clicked_date != st.session_state.get('selected_date_from_chart'):
                                         st.session_state['selected_date_from_chart'] = clicked_date
                                         st.rerun()
-                                except:
+                                except Exception as e:
                                     pass
                     
-                    # Check Volume chart
-                    if "vol-range-chart" in st.session_state and st.session_state["vol-range-chart"].get("selection", {}).get("points"):
-                        points = st.session_state["vol-range-chart"]["selection"]["points"]
-                        if points:
-                            selected_x = points[0].get("x")
+                    # Check Volume chart selection from return value
+                    if vol_event and hasattr(vol_event, 'selection') and vol_event.selection.points:
+                        points = vol_event.selection.points
+                        if points and len(points) > 0:
+                            selected_x = points[0].get("x") if isinstance(points[0], dict) else getattr(points[0], "x", None)
                             if selected_x:
                                 try:
                                     clicked_date = pd.to_datetime(selected_x).strftime('%Y-%m-%d')
-                                    if clicked_date in all_dates_str:
+                                    if clicked_date in all_dates_str and clicked_date != st.session_state.get('selected_date_from_chart'):
                                         st.session_state['selected_date_from_chart'] = clicked_date
                                         st.rerun()
-                                except:
+                                except Exception as e:
                                     pass
                 
                 # Inject sync scripts for range charts
                 sync_script_range = create_xaxis_sync_script(["oi-range-chart", "vol-range-chart"])
                 components.html(sync_script_range, height=0)
                 
-                # Always add hover sync for range charts (direct application like Greeks)
-                hover_sync_range = create_hover_sync_script(["oi-range-chart", "vol-range-chart"])
-                components.html(hover_sync_range, height=0)
+                # HARDCODED hover sync for Range Charts - uses TITLE-BASED detection
+                # Titles: "Open Interest by {x_axis_option}" and "Volume by {x_axis_option}"
+                x_axis_is_date = "true" if x_axis_option == "Expiration Date" else "false"
+                oi_title = f"Open Interest by {x_axis_option}"
+                vol_title = f"Volume by {x_axis_option}"
+                range_hover_sync_script = f"""
+                <script>
+                (function() {{
+                    const rootDoc = (window.parent && window.parent.document) ? window.parent.document : document;
+                    let isHovering = false;
+                    let oiChart = null;
+                    let volChart = null;
+                    let setupDone = false;
+                    const xAxisIsDate = {x_axis_is_date};
+                    const oiTitle = "{oi_title}";
+                    const volTitle = "{vol_title}";
+                    
+                    function findChartByTitle(title) {{
+                        const allCharts = Array.from(rootDoc.querySelectorAll('.js-plotly-plot'));
+                        for (let chart of allCharts) {{
+                            const titleEl = chart.querySelector('.gtitle');
+                            if (titleEl && titleEl.textContent.trim() === title) {{
+                                if (chart.data && chart.data[0] && chart.data[0].x) {{
+                                    return chart;
+                                }}
+                            }}
+                        }}
+                        return null;
+                    }}
+                    
+                    function findRangeCharts() {{
+                        const oi = findChartByTitle(oiTitle);
+                        const vol = findChartByTitle(volTitle);
+                        if (oi && vol) {{
+                            return {{ oi, vol }};
+                        }}
+                        return null;
+                    }}
+                    
+                    function syncHover(sourceChart, targetChart, pointNum) {{
+                        if (!targetChart || !targetChart.data) return;
+                        try {{
+                            const Plotly = window.parent.Plotly || window.Plotly;
+                            if (!Plotly) return;
+                            
+                            const hoverPoints = [];
+                            for (let i = 0; i < targetChart.data.length; i++) {{
+                                if (targetChart.data[i].x && targetChart.data[i].x.length > pointNum) {{
+                                    hoverPoints.push({{ curveNumber: i, pointNumber: pointNum }});
+                                }}
+                            }}
+                            if (hoverPoints.length > 0) {{
+                                Plotly.Fx.hover(targetChart, hoverPoints);
+                            }}
+                        }} catch(e) {{}}
+                    }}
+                    
+                    function handleClick(eventData) {{
+                        if (!xAxisIsDate) return;
+                        if (!eventData || !eventData.points || !eventData.points[0]) return;
+                        
+                        const clickedX = eventData.points[0].x;
+                        console.log('Range chart clicked, x-value:', clickedX);
+                        
+                        const url = new URL(window.parent.location.href);
+                        url.searchParams.set('clicked_date', clickedX);
+                        window.parent.location.href = url.toString();
+                    }}
+                    
+                    function setup() {{
+                        if (setupDone) return true;
+                        
+                        const charts = findRangeCharts();
+                        if (!charts) return false;
+                        
+                        setupDone = true;
+                        oiChart = charts.oi;
+                        volChart = charts.vol;
+                        console.log('Range charts hover sync: Found by title -', oiTitle, volTitle);
+                        
+                        oiChart.on('plotly_hover', function(eventData) {{
+                            if (isHovering || !eventData || !eventData.points || !eventData.points[0]) return;
+                            isHovering = true;
+                            syncHover(oiChart, volChart, eventData.points[0].pointNumber);
+                            setTimeout(() => {{ isHovering = false; }}, 50);
+                        }});
+                        
+                        volChart.on('plotly_hover', function(eventData) {{
+                            if (isHovering || !eventData || !eventData.points || !eventData.points[0]) return;
+                            isHovering = true;
+                            syncHover(volChart, oiChart, eventData.points[0].pointNumber);
+                            setTimeout(() => {{ isHovering = false; }}, 50);
+                        }});
+                        
+                        oiChart.on('plotly_click', handleClick);
+                        volChart.on('plotly_click', handleClick);
+                        
+                        oiChart.on('plotly_unhover', function() {{
+                            try {{
+                                const Plotly = window.parent.Plotly || window.Plotly;
+                                if (Plotly) Plotly.Fx.unhover(volChart);
+                            }} catch(e) {{}}
+                        }});
+                        
+                        volChart.on('plotly_unhover', function() {{
+                            try {{
+                                const Plotly = window.parent.Plotly || window.Plotly;
+                                if (Plotly) Plotly.Fx.unhover(oiChart);
+                            }} catch(e) {{}}
+                        }});
+                        
+                        return true;
+                    }}
+                    
+                    // Polling only - more reliable than MutationObserver for Streamlit
+                    let attempts = 0;
+                    function trySetup() {{
+                        attempts++;
+                        if (setup() || attempts > 60) return;
+                        setTimeout(trySetup, 500);
+                    }}
+                    setTimeout(trySetup, 1000);
+                }})();
+                </script>
+                """
+                components.html(range_hover_sync_script, height=0)
             
             # --- Selected Date Drill-Down Section ---
+            # This section is ALWAYS strike-price based, independent of range chart x-axis setting
+            # It shows detailed analysis for a single selected date across all strike prices
             if not df_range.empty:
                 st.markdown("---")
                 # Date is already selected globally via sidebar
@@ -1385,17 +1416,23 @@ if st.session_state['data']:
                 if selected_date:
                     st.markdown(f"### Strike-Level Analysis for Selected Date: {selected_date}")
                     
-                    # Filter data for selected date
+                    # Filter data for selected date - STRIKE PRICE ANALYSIS ONLY
                     selected_date_data = df_range[df_range['expiry_date'].dt.strftime('%Y-%m-%d') == selected_date]
                     
-                    if not selected_date_data.empty:
+                    # Validate that we have strike price data for this date
+                    if not selected_date_data.empty and 'strike' in selected_date_data.columns:
                         # Aggregate OI by strike for the selected date
                         calls_oi_by_strike = selected_date_data[selected_date_data['type'] == 'call'].groupby('strike')['openInterest'].sum()
                         puts_oi_by_strike = selected_date_data[selected_date_data['type'] == 'put'].groupby('strike')['openInterest'].sum()
                         
-                        # Get all strikes for this date
+                        # Get all strikes for this date (ensure we have strike data)
                         all_strikes = sorted(set(list(calls_oi_by_strike.index) + list(puts_oi_by_strike.index)))
                         
+                        # Validation: ensure we have valid strike data  
+                        if not all_strikes:
+                            st.warning(f"No strike price data available for {selected_date}. Please select a different date.")
+                        
+                        # Proceed with strike-based analysis
                         call_oi_values = [calls_oi_by_strike.get(strike, 0) for strike in all_strikes]
                         put_oi_values = [puts_oi_by_strike.get(strike, 0) for strike in all_strikes]
                         
@@ -1406,12 +1443,12 @@ if st.session_state['data']:
                         call_vol_values = [calls_vol_by_strike.get(strike, 0) for strike in all_strikes]
                         put_vol_values = [puts_vol_by_strike.get(strike, 0) for strike in all_strikes]
                         
-                        # Define chart keys for synchronization
+                        # Define chart keys for synchronization (Strike-based charts only)
                         oi_selected_key = "oi-selected-chart"
-                    vol_selected_key = "vol-selected-chart"
-                    delta_selected_key = "delta-selected-chart"
-                    gamma_selected_key = "gamma-selected-chart"
-                    theta_selected_key = "theta-selected-chart"
+                        vol_selected_key = "vol-selected-chart"
+                        delta_selected_key = "delta-selected-chart"
+                        gamma_selected_key = "gamma-selected-chart"
+                        theta_selected_key = "theta-selected-chart"
                     
                     # Create two charts side by side
                     col_oi, col_vol = st.columns(2)
@@ -1616,16 +1653,229 @@ if st.session_state['data']:
                             )
                             st.plotly_chart(fig_theta, use_container_width=True, key=theta_selected_key)
                         
-                        # Inject hover sync script for Greeks charts (Delta, Gamma, Theta only)
-                        # And also sync with OI and Volume charts for the selected date
-                        sync_script_greeks = create_hover_sync_script([
-                            oi_selected_key,
-                            vol_selected_key,
-                            delta_selected_key, 
-                            gamma_selected_key, 
-                            theta_selected_key
-                        ])
-                        components.html(sync_script_greeks, height=0)
+                        # HARDCODED hover sync for Selected Date OI/Volume charts - uses TITLE-BASED detection
+                        # Titles: "Open Interest by Strike ({date})" and "Volume by Strike ({date})"
+                        oi_selected_title = f"Open Interest by Strike ({selected_date})"
+                        vol_selected_title = f"Volume by Strike ({selected_date})"
+                        selected_oi_vol_hover_sync = f"""
+                        <script>
+                        (function() {{
+                            const rootDoc = (window.parent && window.parent.document) ? window.parent.document : document;
+                            let isHovering = false;
+                            let oiChart = null;
+                            let volChart = null;
+                            let setupDone = false;
+                            const oiTitle = "{oi_selected_title}";
+                            const volTitle = "{vol_selected_title}";
+                            
+                            function findChartByTitle(title) {{
+                                const allCharts = Array.from(rootDoc.querySelectorAll('.js-plotly-plot'));
+                                for (let chart of allCharts) {{
+                                    const titleEl = chart.querySelector('.gtitle');
+                                    if (titleEl && titleEl.textContent.trim() === title) {{
+                                        if (chart.data && chart.data[0] && chart.data[0].x) {{
+                                            return chart;
+                                        }}
+                                    }}
+                                }}
+                                return null;
+                            }}
+                            
+                            function findSelectedDateCharts() {{
+                                const oi = findChartByTitle(oiTitle);
+                                const vol = findChartByTitle(volTitle);
+                                if (oi && vol) {{
+                                    return {{ oi, vol }};
+                                }}
+                                return null;
+                            }}
+                            
+                            function syncHover(sourceChart, targetChart, pointNum) {{
+                                if (!targetChart || !targetChart.data) return;
+                                try {{
+                                    const Plotly = window.parent.Plotly || window.Plotly;
+                                    if (!Plotly) return;
+                                    
+                                    const hoverPoints = [];
+                                    for (let i = 0; i < targetChart.data.length; i++) {{
+                                        if (targetChart.data[i].x && targetChart.data[i].x.length > pointNum) {{
+                                            hoverPoints.push({{ curveNumber: i, pointNumber: pointNum }});
+                                        }}
+                                    }}
+                                    if (hoverPoints.length > 0) {{
+                                        Plotly.Fx.hover(targetChart, hoverPoints);
+                                    }}
+                                }} catch(e) {{}}
+                            }}
+                            
+                            function setup() {{
+                                if (setupDone) return true;
+                                
+                                const charts = findSelectedDateCharts();
+                                if (!charts) return false;
+                                
+                                setupDone = true;
+                                oiChart = charts.oi;
+                                volChart = charts.vol;
+                                console.log('Selected Date OI/Vol hover sync: Found by title -', oiTitle, volTitle);
+                                
+                                oiChart.on('plotly_hover', function(eventData) {{
+                                    if (isHovering || !eventData || !eventData.points || !eventData.points[0]) return;
+                                    isHovering = true;
+                                    syncHover(oiChart, volChart, eventData.points[0].pointNumber);
+                                    setTimeout(() => {{ isHovering = false; }}, 50);
+                                }});
+                                
+                                volChart.on('plotly_hover', function(eventData) {{
+                                    if (isHovering || !eventData || !eventData.points || !eventData.points[0]) return;
+                                    isHovering = true;
+                                    syncHover(volChart, oiChart, eventData.points[0].pointNumber);
+                                    setTimeout(() => {{ isHovering = false; }}, 50);
+                                }});
+                                
+                                oiChart.on('plotly_unhover', function() {{
+                                    try {{
+                                        const Plotly = window.parent.Plotly || window.Plotly;
+                                        if (Plotly) Plotly.Fx.unhover(volChart);
+                                    }} catch(e) {{}}
+                                }});
+                                
+                                volChart.on('plotly_unhover', function() {{
+                                    try {{
+                                        const Plotly = window.parent.Plotly || window.Plotly;
+                                        if (Plotly) Plotly.Fx.unhover(oiChart);
+                                    }} catch(e) {{}}
+                                }});
+                                
+                                return true;
+                            }}
+                            
+                            // Polling only - more reliable than MutationObserver for Streamlit
+                            let attempts = 0;
+                            function trySetup() {{
+                                attempts++;
+                                if (setup() || attempts > 60) return;
+                                setTimeout(trySetup, 500);
+                            }}
+                            setTimeout(trySetup, 1000);
+                        }})();
+                        </script>
+                        """
+                        components.html(selected_oi_vol_hover_sync, height=0)
+                        
+                        # HARDCODED hover sync for Greeks charts - uses TITLE-BASED detection
+                        # Titles: "Delta", "Gamma", "Theta"
+                        greeks_hover_sync = """
+                        <script>
+                        (function() {
+                            const rootDoc = (window.parent && window.parent.document) ? window.parent.document : document;
+                            let isHovering = false;
+                            let deltaChart = null;
+                            let gammaChart = null;
+                            let thetaChart = null;
+                            let setupDone = false;
+                            
+                            function findChartByTitle(title) {
+                                const allCharts = Array.from(rootDoc.querySelectorAll('.js-plotly-plot'));
+                                for (let chart of allCharts) {
+                                    const titleEl = chart.querySelector('.gtitle');
+                                    if (titleEl && titleEl.textContent.trim() === title) {
+                                        if (chart.data && chart.data[0] && chart.data[0].x) {
+                                            return chart;
+                                        }
+                                    }
+                                }
+                                return null;
+                            }
+                            
+                            function findGreeksCharts() {
+                                const delta = findChartByTitle('Delta');
+                                const gamma = findChartByTitle('Gamma');
+                                const theta = findChartByTitle('Theta');
+                                
+                                if (delta && gamma && theta) {
+                                    return { delta, gamma, theta };
+                                }
+                                return null;
+                            }
+                            
+                            function syncHoverToCharts(sourceChart, pointNum, ...targetCharts) {
+                                const Plotly = window.parent.Plotly || window.Plotly;
+                                if (!Plotly) return;
+                                
+                                targetCharts.forEach(targetChart => {
+                                    if (!targetChart || targetChart === sourceChart || !targetChart.data) return;
+                                    try {
+                                        if (targetChart.data[0] && targetChart.data[0].x && targetChart.data[0].x.length > pointNum) {
+                                            Plotly.Fx.hover(targetChart, [{ curveNumber: 0, pointNumber: pointNum }]);
+                                        }
+                                    } catch(e) {}
+                                });
+                            }
+                            
+                            function unhoverAll(exceptChart) {
+                                const Plotly = window.parent.Plotly || window.Plotly;
+                                if (!Plotly) return;
+                                
+                                [deltaChart, gammaChart, thetaChart].forEach(chart => {
+                                    if (chart && chart !== exceptChart) {
+                                        try { Plotly.Fx.unhover(chart); } catch(e) {}
+                                    }
+                                });
+                            }
+                            
+                            function setup() {
+                                if (setupDone) return true;
+                                
+                                const charts = findGreeksCharts();
+                                if (!charts) return false;
+                                
+                                setupDone = true;
+                                deltaChart = charts.delta;
+                                gammaChart = charts.gamma;
+                                thetaChart = charts.theta;
+                                console.log('Greeks hover sync: Found charts by title (Delta, Gamma, Theta)');
+                                
+                                deltaChart.on('plotly_hover', function(eventData) {
+                                    if (isHovering || !eventData || !eventData.points || !eventData.points[0]) return;
+                                    isHovering = true;
+                                    syncHoverToCharts(deltaChart, eventData.points[0].pointNumber, gammaChart, thetaChart);
+                                    setTimeout(() => { isHovering = false; }, 50);
+                                });
+                                
+                                gammaChart.on('plotly_hover', function(eventData) {
+                                    if (isHovering || !eventData || !eventData.points || !eventData.points[0]) return;
+                                    isHovering = true;
+                                    syncHoverToCharts(gammaChart, eventData.points[0].pointNumber, deltaChart, thetaChart);
+                                    setTimeout(() => { isHovering = false; }, 50);
+                                });
+                                
+                                thetaChart.on('plotly_hover', function(eventData) {
+                                    if (isHovering || !eventData || !eventData.points || !eventData.points[0]) return;
+                                    isHovering = true;
+                                    syncHoverToCharts(thetaChart, eventData.points[0].pointNumber, deltaChart, gammaChart);
+                                    setTimeout(() => { isHovering = false; }, 50);
+                                });
+                                
+                                deltaChart.on('plotly_unhover', function() { unhoverAll(deltaChart); });
+                                gammaChart.on('plotly_unhover', function() { unhoverAll(gammaChart); });
+                                thetaChart.on('plotly_unhover', function() { unhoverAll(thetaChart); });
+                                
+                                return true;
+                            }
+                            
+                            // Polling only - more reliable than MutationObserver for Streamlit
+                            let attempts = 0;
+                            function trySetup() {
+                                attempts++;
+                                if (setup() || attempts > 60) return;
+                                setTimeout(trySetup, 500);
+                            }
+                            setTimeout(trySetup, 1000);
+                        })();
+                        </script>
+                        """
+                        components.html(greeks_hover_sync, height=0)
 
 else:
     st.info("Enter a ticker symbol and click 'Analyze' to begin.")
