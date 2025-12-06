@@ -1273,11 +1273,10 @@ if st.session_state['data']:
                 sync_script_range = create_xaxis_sync_script(["oi-range-chart", "vol-range-chart"])
                 components.html(sync_script_range, height=0)
                 
-                # HARDCODED hover sync for Range Charts - uses TITLE-BASED detection
-                # Titles: "Open Interest by {x_axis_option}" and "Volume by {x_axis_option}"
+                # HARDCODED hover sync for Range Charts (oi-range-chart + vol-range-chart)
+                # Uses polling + data-based detection (2-trace bar charts)
+                # Includes click handler to update selected date (when x-axis is Expiration Date)
                 x_axis_is_date = "true" if x_axis_option == "Expiration Date" else "false"
-                oi_title = f"Open Interest by {x_axis_option}"
-                vol_title = f"Volume by {x_axis_option}"
                 range_hover_sync_script = f"""
                 <script>
                 (function() {{
@@ -1287,27 +1286,19 @@ if st.session_state['data']:
                     let volChart = null;
                     let setupDone = false;
                     const xAxisIsDate = {x_axis_is_date};
-                    const oiTitle = "{oi_title}";
-                    const volTitle = "{vol_title}";
-                    
-                    function findChartByTitle(title) {{
-                        const allCharts = Array.from(rootDoc.querySelectorAll('.js-plotly-plot'));
-                        for (let chart of allCharts) {{
-                            const titleEl = chart.querySelector('.gtitle');
-                            if (titleEl && titleEl.textContent.trim() === title) {{
-                                if (chart.data && chart.data[0] && chart.data[0].x) {{
-                                    return chart;
-                                }}
-                            }}
-                        }}
-                        return null;
-                    }}
                     
                     function findRangeCharts() {{
-                        const oi = findChartByTitle(oiTitle);
-                        const vol = findChartByTitle(volTitle);
-                        if (oi && vol) {{
-                            return {{ oi, vol }};
+                        // Find all bar charts with exactly 2 traces (Call + Put)
+                        const allCharts = Array.from(rootDoc.querySelectorAll('.js-plotly-plot'));
+                        const barCharts = allCharts.filter(chart => {{
+                            return chart.data && chart.data.length === 2 && chart.data[0].type === 'bar';
+                        }});
+                        
+                        // The first two 2-trace bar charts are the range OI and range Volume
+                        if (barCharts.length >= 2) {{
+                            if (barCharts[0].data[0].x && barCharts[1].data[0].x) {{
+                                return {{ oi: barCharts[0], vol: barCharts[1] }};
+                            }}
                         }}
                         return null;
                     }}
@@ -1335,8 +1326,6 @@ if st.session_state['data']:
                         if (!eventData || !eventData.points || !eventData.points[0]) return;
                         
                         const clickedX = eventData.points[0].x;
-                        console.log('Range chart clicked, x-value:', clickedX);
-                        
                         const url = new URL(window.parent.location.href);
                         url.searchParams.set('clicked_date', clickedX);
                         window.parent.location.href = url.toString();
@@ -1351,7 +1340,7 @@ if st.session_state['data']:
                         setupDone = true;
                         oiChart = charts.oi;
                         volChart = charts.vol;
-                        console.log('Range charts hover sync: Found by title -', oiTitle, volTitle);
+                        console.log('Range charts hover sync: Setup complete');
                         
                         oiChart.on('plotly_hover', function(eventData) {{
                             if (isHovering || !eventData || !eventData.points || !eventData.points[0]) return;
@@ -1387,7 +1376,7 @@ if st.session_state['data']:
                         return true;
                     }}
                     
-                    // Polling only - more reliable than MutationObserver for Streamlit
+                    // Polling only
                     let attempts = 0;
                     function trySetup() {{
                         attempts++;
@@ -1653,112 +1642,100 @@ if st.session_state['data']:
                             )
                             st.plotly_chart(fig_theta, use_container_width=True, key=theta_selected_key)
                         
-                        # HARDCODED hover sync for Selected Date OI/Volume charts - uses TITLE-BASED detection
-                        # Titles: "Open Interest by Strike ({date})" and "Volume by Strike ({date})"
-                        oi_selected_title = f"Open Interest by Strike ({selected_date})"
-                        vol_selected_title = f"Volume by Strike ({selected_date})"
-                        selected_oi_vol_hover_sync = f"""
+                        # HARDCODED hover sync for Selected Date OI/Volume charts
+                        # Uses polling + data-based detection (3rd and 4th 2-trace bar charts)
+                        selected_oi_vol_hover_sync = """
                         <script>
-                        (function() {{
+                        (function() {
                             const rootDoc = (window.parent && window.parent.document) ? window.parent.document : document;
                             let isHovering = false;
                             let oiChart = null;
                             let volChart = null;
                             let setupDone = false;
-                            const oiTitle = "{oi_selected_title}";
-                            const volTitle = "{vol_selected_title}";
                             
-                            function findChartByTitle(title) {{
+                            function findSelectedDateBarCharts() {
                                 const allCharts = Array.from(rootDoc.querySelectorAll('.js-plotly-plot'));
-                                for (let chart of allCharts) {{
-                                    const titleEl = chart.querySelector('.gtitle');
-                                    if (titleEl && titleEl.textContent.trim() === title) {{
-                                        if (chart.data && chart.data[0] && chart.data[0].x) {{
-                                            return chart;
-                                        }}
-                                    }}
-                                }}
+                                const barCharts = allCharts.filter(chart => {
+                                    return chart.data && chart.data.length === 2 && chart.data[0].type === 'bar';
+                                });
+                                
+                                if (barCharts.length >= 4) {
+                                    if (barCharts[2].data[0].x && barCharts[3].data[0].x) {
+                                        return { oi: barCharts[2], vol: barCharts[3] };
+                                    }
+                                }
                                 return null;
-                            }}
+                            }
                             
-                            function findSelectedDateCharts() {{
-                                const oi = findChartByTitle(oiTitle);
-                                const vol = findChartByTitle(volTitle);
-                                if (oi && vol) {{
-                                    return {{ oi, vol }};
-                                }}
-                                return null;
-                            }}
-                            
-                            function syncHover(sourceChart, targetChart, pointNum) {{
+                            function syncHover(sourceChart, targetChart, pointNum) {
                                 if (!targetChart || !targetChart.data) return;
-                                try {{
+                                try {
                                     const Plotly = window.parent.Plotly || window.Plotly;
                                     if (!Plotly) return;
                                     
                                     const hoverPoints = [];
-                                    for (let i = 0; i < targetChart.data.length; i++) {{
-                                        if (targetChart.data[i].x && targetChart.data[i].x.length > pointNum) {{
-                                            hoverPoints.push({{ curveNumber: i, pointNumber: pointNum }});
-                                        }}
-                                    }}
-                                    if (hoverPoints.length > 0) {{
+                                    for (let i = 0; i < targetChart.data.length; i++) {
+                                        if (targetChart.data[i].x && targetChart.data[i].x.length > pointNum) {
+                                            hoverPoints.push({ curveNumber: i, pointNumber: pointNum });
+                                        }
+                                    }
+                                    if (hoverPoints.length > 0) {
                                         Plotly.Fx.hover(targetChart, hoverPoints);
-                                    }}
-                                }} catch(e) {{}}
-                            }}
+                                    }
+                                } catch(e) {}
+                            }
                             
-                            function setup() {{
+                            function setup() {
                                 if (setupDone) return true;
                                 
-                                const charts = findSelectedDateCharts();
+                                const charts = findSelectedDateBarCharts();
                                 if (!charts) return false;
                                 
                                 setupDone = true;
                                 oiChart = charts.oi;
                                 volChart = charts.vol;
-                                console.log('Selected Date OI/Vol hover sync: Found by title -', oiTitle, volTitle);
+                                console.log('Selected Date OI/Vol hover sync: Setup complete');
                                 
-                                oiChart.on('plotly_hover', function(eventData) {{
+                                oiChart.on('plotly_hover', function(eventData) {
                                     if (isHovering || !eventData || !eventData.points || !eventData.points[0]) return;
                                     isHovering = true;
                                     syncHover(oiChart, volChart, eventData.points[0].pointNumber);
-                                    setTimeout(() => {{ isHovering = false; }}, 50);
-                                }});
+                                    setTimeout(() => { isHovering = false; }, 50);
+                                });
                                 
-                                volChart.on('plotly_hover', function(eventData) {{
+                                volChart.on('plotly_hover', function(eventData) {
                                     if (isHovering || !eventData || !eventData.points || !eventData.points[0]) return;
                                     isHovering = true;
                                     syncHover(volChart, oiChart, eventData.points[0].pointNumber);
-                                    setTimeout(() => {{ isHovering = false; }}, 50);
-                                }});
+                                    setTimeout(() => { isHovering = false; }, 50);
+                                });
                                 
-                                oiChart.on('plotly_unhover', function() {{
-                                    try {{
+                                oiChart.on('plotly_unhover', function() {
+                                    try {
                                         const Plotly = window.parent.Plotly || window.Plotly;
                                         if (Plotly) Plotly.Fx.unhover(volChart);
-                                    }} catch(e) {{}}
-                                }});
+                                    } catch(e) {}
+                                });
                                 
-                                volChart.on('plotly_unhover', function() {{
-                                    try {{
+                                volChart.on('plotly_unhover', function() {
+                                    try {
                                         const Plotly = window.parent.Plotly || window.Plotly;
                                         if (Plotly) Plotly.Fx.unhover(oiChart);
-                                    }} catch(e) {{}}
-                                }});
+                                    } catch(e) {}
+                                });
                                 
                                 return true;
-                            }}
+                            }
                             
-                            // Polling only - more reliable than MutationObserver for Streamlit
+                            // Polling only
                             let attempts = 0;
-                            function trySetup() {{
+                            function trySetup() {
                                 attempts++;
                                 if (setup() || attempts > 60) return;
                                 setTimeout(trySetup, 500);
-                            }}
+                            }
                             setTimeout(trySetup, 1000);
-                        }})();
+                        })();
                         </script>
                         """
                         components.html(selected_oi_vol_hover_sync, height=0)
