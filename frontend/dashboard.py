@@ -1274,116 +1274,67 @@ if st.session_state['data']:
                 components.html(sync_script_range, height=0)
                 
                 # HARDCODED hover sync for Range Charts (oi-range-chart + vol-range-chart)
-                # Uses polling + data-based detection (2-trace bar charts)
-                # Includes click handler to update selected date (when x-axis is Expiration Date)
+                # Rebinds after rerenders; detects first two 2-trace bar charts; click updates date when x-axis is Expiration Date
                 x_axis_is_date = "true" if x_axis_option == "Expiration Date" else "false"
                 range_hover_sync_script = f"""
                 <script>
                 (function() {{
                     const rootDoc = (window.parent && window.parent.document) ? window.parent.document : document;
                     let isHovering = false;
-                    let oiChart = null;
-                    let volChart = null;
-                    let setupDone = false;
-                    const xAxisIsDate = {x_axis_is_date};
-                    
+                    let oiChart = null, volChart = null;
+                    let lastKey = "";
+                    const xAxisIsDate = { "true" if x_axis_option == "Expiration Date" else "false" };
+
                     function findRangeCharts() {{
-                        // Find all bar charts with exactly 2 traces (Call + Put)
-                        const allCharts = Array.from(rootDoc.querySelectorAll('.js-plotly-plot'));
-                        const barCharts = allCharts.filter(chart => {{
-                            return chart.data && chart.data.length === 2 && chart.data[0].type === 'bar';
-                        }});
-                        
-                        // The first two 2-trace bar charts are the range OI and range Volume
-                        if (barCharts.length >= 2) {{
-                            if (barCharts[0].data[0].x && barCharts[1].data[0].x) {{
-                                return {{ oi: barCharts[0], vol: barCharts[1] }};
-                            }}
-                        }}
+                        const charts = Array.from(rootDoc.querySelectorAll('.js-plotly-plot'));
+                        const bars2 = charts.filter(c => c.data && c.data.length === 2 && c.data[0].type === 'bar');
+                        if (bars2.length >= 2 && bars2[0].data[0].x && bars2[1].data[0].x) return {{ oi: bars2[0], vol: bars2[1] }};
                         return null;
                     }}
-                    
-                    function syncHover(sourceChart, targetChart, pointNum) {{
-                        if (!targetChart || !targetChart.data) return;
-                        try {{
+
+                    function bindIfNeeded() {{
+                        const found = findRangeCharts();
+                        if (!found) return;
+                        const key = `${{found.oi}}_${{found.vol}}_${{(found.oi.data[0].x||[]).length}}_${{(found.vol.data[0].x||[]).length}}`;
+                        if (key === lastKey) return;
+                        lastKey = key;
+
+                        oiChart = found.oi; volChart = found.vol;
+                        console.log('Range hover sync rebound');
+
+                        function sync(source, target, pointNum) {{
                             const Plotly = window.parent.Plotly || window.Plotly;
-                            if (!Plotly) return;
-                            
-                            const hoverPoints = [];
-                            for (let i = 0; i < targetChart.data.length; i++) {{
-                                if (targetChart.data[i].x && targetChart.data[i].x.length > pointNum) {{
-                                    hoverPoints.push({{ curveNumber: i, pointNumber: pointNum }});
-                                }}
+                            if (!Plotly || !target || !target.data) return;
+                            const pts = [];
+                            for (let i=0;i<target.data.length;i++) {{
+                                if (target.data[i].x && target.data[i].x.length > pointNum) pts.push({{curveNumber:i, pointNumber:pointNum}});
                             }}
-                            if (hoverPoints.length > 0) {{
-                                Plotly.Fx.hover(targetChart, hoverPoints);
-                            }}
-                        }} catch(e) {{}}
-                    }}
-                    
-                    function handleClick(eventData) {{
-                        if (!xAxisIsDate) return;
-                        if (!eventData || !eventData.points || !eventData.points[0]) return;
-                        
-                        const clickedX = eventData.points[0].x;
-                        const url = new URL(window.parent.location.href);
-                        url.searchParams.set('clicked_date', clickedX);
-                        window.parent.location.href = url.toString();
-                    }}
-                    
-                    function setup() {{
-                        if (setupDone) return true;
-                        
-                        const charts = findRangeCharts();
-                        if (!charts) return false;
-                        
-                        setupDone = true;
-                        oiChart = charts.oi;
-                        volChart = charts.vol;
-                        console.log('Range charts hover sync: Setup complete');
-                        
-                        oiChart.on('plotly_hover', function(eventData) {{
-                            if (isHovering || !eventData || !eventData.points || !eventData.points[0]) return;
-                            isHovering = true;
-                            syncHover(oiChart, volChart, eventData.points[0].pointNumber);
-                            setTimeout(() => {{ isHovering = false; }}, 50);
-                        }});
-                        
-                        volChart.on('plotly_hover', function(eventData) {{
-                            if (isHovering || !eventData || !eventData.points || !eventData.points[0]) return;
-                            isHovering = true;
-                            syncHover(volChart, oiChart, eventData.points[0].pointNumber);
-                            setTimeout(() => {{ isHovering = false; }}, 50);
-                        }});
-                        
+                            if (pts.length) Plotly.Fx.hover(target, pts);
+                        }}
+
+                        function handleClick(ev) {{
+                            if (!xAxisIsDate || !ev?.points?.[0]) return;
+                            const clickedX = ev.points[0].x;
+                            const url = new URL(window.parent.location.href);
+                            url.searchParams.set('clicked_date', clickedX);
+                            window.parent.location.href = url.toString();
+                        }}
+
+                        oiChart.on('plotly_hover', ev => {{ if (isHovering || !ev?.points?.[0]) return; isHovering=true; sync(oiChart, volChart, ev.points[0].pointNumber); setTimeout(()=>isHovering=false,50); }});
+                        volChart.on('plotly_hover', ev => {{ if (isHovering || !ev?.points?.[0]) return; isHovering=true; sync(volChart, oiChart, ev.points[0].pointNumber); setTimeout(()=>isHovering=false,50); }});
+
                         oiChart.on('plotly_click', handleClick);
                         volChart.on('plotly_click', handleClick);
-                        
-                        oiChart.on('plotly_unhover', function() {{
-                            try {{
-                                const Plotly = window.parent.Plotly || window.Plotly;
-                                if (Plotly) Plotly.Fx.unhover(volChart);
-                            }} catch(e) {{}}
-                        }});
-                        
-                        volChart.on('plotly_unhover', function() {{
-                            try {{
-                                const Plotly = window.parent.Plotly || window.Plotly;
-                                if (Plotly) Plotly.Fx.unhover(oiChart);
-                            }} catch(e) {{}}
-                        }});
-                        
-                        return true;
+
+                        oiChart.on('plotly_unhover', () => {{ try {{ (window.parent.Plotly||window.Plotly).Fx.unhover(volChart); }} catch(e){{}} }});
+                        volChart.on('plotly_unhover', () => {{ try {{ (window.parent.Plotly||window.Plotly).Fx.unhover(oiChart); }} catch(e){{}} }});
                     }}
-                    
-                    // Polling only
-                    let attempts = 0;
-                    function trySetup() {{
-                        attempts++;
-                        if (setup() || attempts > 60) return;
-                        setTimeout(trySetup, 500);
+
+                    function tick(attempt=0) {{
+                        bindIfNeeded();
+                        if (attempt < 120) setTimeout(()=>tick(attempt+1), 500);
                     }}
-                    setTimeout(trySetup, 1000);
+                    setTimeout(()=>tick(0), 500);
                 }})();
                 </script>
                 """
@@ -1740,115 +1691,83 @@ if st.session_state['data']:
                         """
                         components.html(selected_oi_vol_hover_sync, height=0)
                         
-                        # HARDCODED hover sync for Greeks charts - uses TITLE-BASED detection
-                        # Titles: "Delta", "Gamma", "Theta"
+                        # HARDCODED hover sync for Greeks charts (Delta, Gamma, Theta)
+                        # Key-based lookup (data-testid contains the chart key), falls back to title
                         greeks_hover_sync = """
                         <script>
                         (function() {
                             const rootDoc = (window.parent && window.parent.document) ? window.parent.document : document;
                             let isHovering = false;
-                            let deltaChart = null;
-                            let gammaChart = null;
-                            let thetaChart = null;
-                            let setupDone = false;
-                            
-                            function findChartByTitle(title) {
-                                const allCharts = Array.from(rootDoc.querySelectorAll('.js-plotly-plot'));
-                                for (let chart of allCharts) {
-                                    const titleEl = chart.querySelector('.gtitle');
-                                    if (titleEl && titleEl.textContent.trim() === title) {
-                                        if (chart.data && chart.data[0] && chart.data[0].x) {
-                                            return chart;
-                                        }
-                                    }
+                            let deltaChart = null, gammaChart = null, thetaChart = null;
+                            let lastKey = "";
+
+                            const deltaKey = "delta-selected-chart";
+                            const gammaKey = "gamma-selected-chart";
+                            const thetaKey = "theta-selected-chart";
+
+                            function findByKey(key) {
+                                const container = rootDoc.querySelector(`[data-testid*="${key}"]`);
+                                if (container) {
+                                    const plot = container.querySelector('.js-plotly-plot');
+                                    if (plot && plot.data && plot.data[0] && plot.data[0].x) return plot;
                                 }
                                 return null;
                             }
-                            
-                            function findGreeksCharts() {
-                                const delta = findChartByTitle('Delta');
-                                const gamma = findChartByTitle('Gamma');
-                                const theta = findChartByTitle('Theta');
-                                
-                                if (delta && gamma && theta) {
-                                    return { delta, gamma, theta };
+
+                            function findByTitle(title) {
+                                const charts = Array.from(rootDoc.querySelectorAll('.js-plotly-plot'));
+                                for (const c of charts) {
+                                    const t = c.querySelector('.gtitle');
+                                    if (t && t.textContent.trim() === title && c.data && c.data[0] && c.data[0].x) return c;
                                 }
                                 return null;
                             }
-                            
-                            function syncHoverToCharts(sourceChart, pointNum, ...targetCharts) {
-                                const Plotly = window.parent.Plotly || window.Plotly;
-                                if (!Plotly) return;
-                                
-                                targetCharts.forEach(targetChart => {
-                                    if (!targetChart || targetChart === sourceChart || !targetChart.data) return;
-                                    try {
-                                        if (targetChart.data[0] && targetChart.data[0].x && targetChart.data[0].x.length > pointNum) {
-                                            Plotly.Fx.hover(targetChart, [{ curveNumber: 0, pointNumber: pointNum }]);
+
+                            function bindIfNeeded() {
+                                const d = findByKey(deltaKey) || findByTitle('Delta');
+                                const g = findByKey(gammaKey) || findByTitle('Gamma');
+                                const t = findByKey(thetaKey) || findByTitle('Theta');
+                                if (!d || !g || !t) return;
+
+                                const key = `${d}_${g}_${t}_${(d.data[0].x||[]).length}_${(g.data[0].x||[]).length}_${(t.data[0].x||[]).length}`;
+                                if (key === lastKey) return;
+                                lastKey = key;
+
+                                deltaChart = d; gammaChart = g; thetaChart = t;
+                                console.log('Greeks hover sync bound (key-based)');
+
+                                function sync(src, pointNum, targets) {
+                                    const Plotly = window.parent.Plotly || window.Plotly;
+                                    if (!Plotly) return;
+                                    targets.forEach(ch => {
+                                        if (!ch || ch === src || !ch.data || !ch.data[0] || !ch.data[0].x) return;
+                                        if ((ch.data[0].x||[]).length > pointNum) {
+                                            try { Plotly.Fx.hover(ch, [{curveNumber:0, pointNumber:pointNum}]); } catch(e){}
                                         }
-                                    } catch(e) {}
-                                });
+                                    });
+                                }
+                                function unhover(except) {
+                                    const Plotly = window.parent.Plotly || window.Plotly;
+                                    if (!Plotly) return;
+                                    [deltaChart, gammaChart, thetaChart].forEach(ch => {
+                                        if (ch && ch !== except) { try { Plotly.Fx.unhover(ch); } catch(e){} }
+                                    });
+                                }
+
+                                deltaChart.on('plotly_hover', ev => { if (isHovering || !ev.points?.[0]) return; isHovering=true; sync(deltaChart, ev.points[0].pointNumber, [gammaChart, thetaChart]); setTimeout(()=>isHovering=false,50); });
+                                gammaChart.on('plotly_hover', ev => { if (isHovering || !ev.points?.[0]) return; isHovering=true; sync(gammaChart, ev.points[0].pointNumber, [deltaChart, thetaChart]); setTimeout(()=>isHovering=false,50); });
+                                thetaChart.on('plotly_hover', ev => { if (isHovering || !ev.points?.[0]) return; isHovering=true; sync(thetaChart, ev.points[0].pointNumber, [deltaChart, gammaChart]); setTimeout(()=>isHovering=false,50); });
+
+                                deltaChart.on('plotly_unhover', ()=>unhover(deltaChart));
+                                gammaChart.on('plotly_unhover', ()=>unhover(gammaChart));
+                                thetaChart.on('plotly_unhover', ()=>unhover(thetaChart));
                             }
-                            
-                            function unhoverAll(exceptChart) {
-                                const Plotly = window.parent.Plotly || window.Plotly;
-                                if (!Plotly) return;
-                                
-                                [deltaChart, gammaChart, thetaChart].forEach(chart => {
-                                    if (chart && chart !== exceptChart) {
-                                        try { Plotly.Fx.unhover(chart); } catch(e) {}
-                                    }
-                                });
+
+                            function tick(attempt=0) {
+                                bindIfNeeded();
+                                if (attempt < 120) setTimeout(()=>tick(attempt+1), 500); // up to ~60s
                             }
-                            
-                            function setup() {
-                                if (setupDone) return true;
-                                
-                                const charts = findGreeksCharts();
-                                if (!charts) return false;
-                                
-                                setupDone = true;
-                                deltaChart = charts.delta;
-                                gammaChart = charts.gamma;
-                                thetaChart = charts.theta;
-                                console.log('Greeks hover sync: Found charts by title (Delta, Gamma, Theta)');
-                                
-                                deltaChart.on('plotly_hover', function(eventData) {
-                                    if (isHovering || !eventData || !eventData.points || !eventData.points[0]) return;
-                                    isHovering = true;
-                                    syncHoverToCharts(deltaChart, eventData.points[0].pointNumber, gammaChart, thetaChart);
-                                    setTimeout(() => { isHovering = false; }, 50);
-                                });
-                                
-                                gammaChart.on('plotly_hover', function(eventData) {
-                                    if (isHovering || !eventData || !eventData.points || !eventData.points[0]) return;
-                                    isHovering = true;
-                                    syncHoverToCharts(gammaChart, eventData.points[0].pointNumber, deltaChart, thetaChart);
-                                    setTimeout(() => { isHovering = false; }, 50);
-                                });
-                                
-                                thetaChart.on('plotly_hover', function(eventData) {
-                                    if (isHovering || !eventData || !eventData.points || !eventData.points[0]) return;
-                                    isHovering = true;
-                                    syncHoverToCharts(thetaChart, eventData.points[0].pointNumber, deltaChart, gammaChart);
-                                    setTimeout(() => { isHovering = false; }, 50);
-                                });
-                                
-                                deltaChart.on('plotly_unhover', function() { unhoverAll(deltaChart); });
-                                gammaChart.on('plotly_unhover', function() { unhoverAll(gammaChart); });
-                                thetaChart.on('plotly_unhover', function() { unhoverAll(thetaChart); });
-                                
-                                return true;
-                            }
-                            
-                            // Polling only - more reliable than MutationObserver for Streamlit
-                            let attempts = 0;
-                            function trySetup() {
-                                attempts++;
-                                if (setup() || attempts > 60) return;
-                                setTimeout(trySetup, 500);
-                            }
-                            setTimeout(trySetup, 1000);
+                            setTimeout(()=>tick(0), 500);
                         })();
                         </script>
                         """
