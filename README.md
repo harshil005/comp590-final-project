@@ -1,8 +1,8 @@
 # Stock Options Visualization Engine
 
-**Live Demo:** http://18.116.64.76:8080/
+**Deployed Link:** http://18.116.64.76:8080/
 
-#### Please refer to below to open the dashboard locally if the link is down, it is possible that we may have run out of credits!
+#### Please clone the repo and run the commands below in separate terminals to open the dashboard locally if the link is down, it is possible that we may have run out of credits!
 
 ## Quick Start 
 
