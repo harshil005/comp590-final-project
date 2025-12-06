@@ -1138,7 +1138,6 @@ if st.session_state['data']:
                 col_oi, col_vol = st.columns(2)
 
                 with col_oi:
-                    st.markdown("**Open Interest**")
                     fig_oi = go.Figure()
                     fig_oi.add_trace(go.Bar(
                         x=all_x_values,
@@ -1189,7 +1188,6 @@ if st.session_state['data']:
                     oi_event = st.plotly_chart(fig_oi, use_container_width=True, key="oi-range-chart", on_select="rerun", selection_mode="points")
 
                 with col_vol:
-                    st.markdown("**Volume**")
                     fig_vol = go.Figure()
                     fig_vol.add_trace(go.Bar(
                         x=all_x_values,
