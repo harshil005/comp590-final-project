@@ -457,72 +457,25 @@ if st.session_state['data']:
         df_greeks_global['expiry_str'] = df_greeks_global['expiry_dt'].dt.strftime('%Y-%m-%d')
         all_dates_str = sorted(df_greeks_global['expiry_str'].unique())
 
-    # Sidebar Range Slider
+    # Initialize default values (moved to inline controls in respective sections)
     selected_range_start = None
     selected_range_end = None
-    selected_date_sidebar = None
-    
-    if all_dates_str:
-        st.sidebar.markdown("---")
-        st.sidebar.header("Global Filters")
-        
-        # Default to full range
-        start_default, end_default = all_dates_str[0], all_dates_str[-1]
-        
-        # Check if we have a saved range in session state and VALIDATE it against current options
-        if "selected_range_from_state" in st.session_state:
-            saved_range = st.session_state["selected_range_from_state"]
-            # Reset if saved range is not valid for current dates
-            if (isinstance(saved_range, tuple) and len(saved_range) == 2 and 
-                (saved_range[0] not in all_dates_str or saved_range[1] not in all_dates_str)):
-                st.session_state["selected_range_from_state"] = (start_default, end_default)
-        else:
-             st.session_state["selected_range_from_state"] = (start_default, end_default)
-        
-        # Use the saved range directly without button controls
-        saved_range = st.session_state["selected_range_from_state"]
+    selected_date = None
+    available_dates_in_range = []
 
-        select_range = st.sidebar.select_slider(
-            "Expiration Date Range",
-            options=all_dates_str,
-            value=st.session_state["selected_range_from_state"],
-            key="expiration_range_slider",
-            help="Filter all charts by expiration date range."
-        )
-        selected_range_start, selected_range_end = select_range
-        
-        # Update session state
-        st.session_state["selected_range_from_state"] = select_range
-        
-        # Filter dates available for specific selection based on range
-        available_dates_in_range = [d for d in all_dates_str if selected_range_start <= d <= selected_range_end]
-        
-        # Initialize sidebar selection with session state if set by chart click
+    if all_dates_str:
+        # Default to full range if not set
+        if "selected_range_from_state" not in st.session_state:
+            st.session_state["selected_range_from_state"] = (all_dates_str[0], all_dates_str[-1])
+
+        # Initialize selected_date_from_chart if not set
         if 'selected_date_from_chart' not in st.session_state:
-             # Default to first available date if nothing selected yet
-            st.session_state['selected_date_from_chart'] = available_dates_in_range[0] if available_dates_in_range else None
-        
-        # Verify stored date is actually in the available range (e.g. if range changed)
-        if st.session_state['selected_date_from_chart'] not in available_dates_in_range:
-             st.session_state['selected_date_from_chart'] = available_dates_in_range[0] if available_dates_in_range else None
-        
-        # Determine index for selectbox
-        sidebar_index = 0
-        if st.session_state['selected_date_from_chart'] in available_dates_in_range:
-             sidebar_index = available_dates_in_range.index(st.session_state['selected_date_from_chart'])
-        
-        if available_dates_in_range:
-            selected_date_sidebar = st.sidebar.selectbox(
-                "Detailed Analysis Date",
-                available_dates_in_range,
-                key="selected_exp_date_sidebar",
-                index=sidebar_index,
-                help="Select specific expiration date for detailed strike-level analysis (Greeks, OI breakdown)."
-            )
-            # Sync back to session state to keep them in sync
-            st.session_state['selected_date_from_chart'] = selected_date_sidebar
-            # Also auto-populate global selected_date variable for use in charts below
-            selected_date = selected_date_sidebar
+            st.session_state['selected_date_from_chart'] = all_dates_str[0]
+
+        # Set initial values for use in charts
+        selected_range_start, selected_range_end = st.session_state.get("selected_range_from_state", (all_dates_str[0], all_dates_str[-1]))
+        available_dates_in_range = [d for d in all_dates_str if selected_range_start <= d <= selected_range_end]
+        selected_date = st.session_state.get('selected_date_from_chart', available_dates_in_range[0] if available_dates_in_range else None)
     
     # --- Top Row Metrics: Comparative Market Pulse ---
     c1, c2 = st.columns(2)
@@ -614,7 +567,12 @@ if st.session_state['data']:
                     fig_map.add_hline(y=put_wall, line_dash="dot", line_color=call_color, annotation_text=f"Support (Put Wall): ${put_wall:,.0f}")
                 
                 fig_map.update_layout(
-                    title="Historical Price vs. Options-Derived Support & Resistance",
+                    title=dict(
+                        text="Historical Price vs. Options-Derived Support & Resistance",
+                        font=dict(color=text_color, size=20),
+                        x=0.5,
+                        xanchor='center'
+                    ),
                     template=chart_template,
                     hovermode="x unified",
                     height=500,
@@ -623,7 +581,6 @@ if st.session_state['data']:
                     plot_bgcolor=plot_bg_color,
                     paper_bgcolor=paper_bg_color,
                     font=dict(color=text_color),
-                    title_font=dict(color=text_color),
                     xaxis=dict(
                         title_font=dict(color=axis_title_color),
                         tickfont=dict(color=tick_color)
@@ -638,22 +595,41 @@ if st.session_state['data']:
     
     # --- Volatility Analysis Section ---
     with st.container(border=True):
-        st.markdown("#### Volatility Analysis")
+        # Title and range slider on same row
+        vol_title_col, vol_slider_col = st.columns([1, 2])
+        with vol_title_col:
+            st.markdown("#### Volatility Analysis")
+        with vol_slider_col:
+            if all_dates_str:
+                # Inline range slider for volatility charts
+                select_range = st.select_slider(
+                    "Expiration Date Range",
+                    options=all_dates_str,
+                    value=st.session_state.get("selected_range_from_state", (all_dates_str[0], all_dates_str[-1])),
+                    key="expiration_range_slider_inline",
+                    help="Filter volatility charts by expiration date range.",
+                    label_visibility="collapsed"
+                )
+                selected_range_start, selected_range_end = select_range
+                st.session_state["selected_range_from_state"] = select_range
+
+                # Filter dates available for specific selection based on range
+                available_dates_in_range = [d for d in all_dates_str if selected_range_start <= d <= selected_range_end]
+
+                # Update session state
+                if 'selected_date_from_chart' not in st.session_state or st.session_state['selected_date_from_chart'] not in available_dates_in_range:
+                    st.session_state['selected_date_from_chart'] = available_dates_in_range[0] if available_dates_in_range else None
+
         with st.expander("How to Use This Chart", expanded=False):
             st.markdown("""
-            Volatility analysis helps you identify where options are cheap or expensive relative to historical patterns and market expectations.
             
             **3D Volatility Surface:**
-            - **What it shows:** A three-dimensional view of implied volatility across all strike prices and expiration dates
             - **Red peaks = High IV:** Options are expensive (high fear/uncertainty)
             - **Valleys = Low IV:** Options are relatively cheap
-            - **Example Scenario:** If you see a peak at `$150` strike with 30-day expiration but a valley at `$155` strike with 60-day expiration, those `$155` strike options with 60-day expiration are cheaper - good for buyers but poor premium for sellers.
             
             **2D Volatility Heatmap:**
-            - **What it shows:** A color-coded view of implied volatility for calls and puts across selected expiration dates
             - **Hot colors (red/orange):** High implied volatility = expensive options
             - **Cool colors (blue/green):** Low implied volatility = cheaper options
-            - **Example Scenario:** If calls show high IV at ATM strikes but puts show low IV, it suggests bullish sentiment - traders are paying more for upside protection. This could indicate an overbought condition.
             
             **Trading Applications:**
             - **Buying Opportunities:** Look for valleys in the surface where IV is low - you can buy options cheaper
@@ -667,87 +643,95 @@ if st.session_state['data']:
             spot_price = float(data['raw_x'][0]) if data['raw_x'] else 400.0
             expirations = sorted(df_greeks['expiry'].unique())
             
-            # 3D Volatility Surface
-            if "mesh_z" in data and data["mesh_z"]:
-                st.markdown("**3D Volatility Surface**")
-                # Convert mesh_z from decimal to percentage (multiply by 100)
-                mesh_z_percent = np.array(data['mesh_z']) * 100
-                
-                fig_surf = go.Figure(data=[go.Surface(
-                    z=mesh_z_percent.tolist(), 
-                    x=data['mesh_x'], 
-                    y=data['mesh_y'], 
-                    colorscale=heatmap_colorscale, 
-                    cmin=0, 
-                    opacity=0.9, 
-                    colorbar=dict(
-                        title=dict(text='Implied Volatility (%)', font=dict(color=axis_title_color)),
-                        tickfont=dict(color=tick_color),
-                        tickformat='.0f',
-                        ticksuffix='%'
-                    ), 
-                    lighting=dict(ambient=0.5, diffuse=0.5),
-                    hovertemplate='Strike: $%{x:.2f}<br>Days to Expiry: %{y:.1f}<br>IV: %{z:.1f}%<extra></extra>'
-                )])
-                fig_surf.update_layout(
-                    title=dict(
-                        text='3D Volatility Surface: Find Cheap Options in Valleys',
-                        font=dict(color=text_color)
-                    ),
-                    template=chart_template,
-                    height=600,
-                    plot_bgcolor=plot_bg_color,
-                    paper_bgcolor=paper_bg_color,
-                    font=dict(color=text_color),
-                    scene=dict(
-                        bgcolor=plot_bg_color,
-                        xaxis=dict(
-                            title=dict(
-                                text='Strike Price ($)',
-                                font=dict(color=axis_title_color)
-                            ),
-                            tickfont=dict(color=tick_color),
-                            gridcolor=grid_color
-                        ),
-                        yaxis=dict(
-                            title=dict(
-                                text='Days to Expiry',
-                                font=dict(color=axis_title_color)
-                            ),
-                            tickfont=dict(color=tick_color),
-                            gridcolor=grid_color
-                        ),
-                        zaxis=dict(
-                            title=dict(
-                                text='Implied Volatility (%)',
-                                font=dict(color=axis_title_color)
-                            ),
-                            tickfont=dict(color=tick_color),
-                            gridcolor=grid_color,
+            # Create two columns: 3D surface on left (50%), heatmaps on right (50%)
+            col_3d, col_heatmaps = st.columns([1, 1])
+
+            # Left column: 3D Volatility Surface
+            with col_3d:
+                if "mesh_z" in data and data["mesh_z"]:
+                    st.markdown("**3D Volatility Surface**")
+                    # Convert mesh_z from decimal to percentage (multiply by 100)
+                    mesh_z_percent = np.array(data['mesh_z']) * 100
+
+                    fig_surf = go.Figure(data=[go.Surface(
+                        z=mesh_z_percent.tolist(),
+                        x=data['mesh_x'],
+                        y=data['mesh_y'],
+                        colorscale=heatmap_colorscale,
+                        cmin=0,
+                        opacity=0.9,
+                        colorbar=dict(
+                            title=dict(text='IV (%)', font=dict(color=axis_title_color, size=9)),
+                            tickfont=dict(color=tick_color, size=8),
                             tickformat='.0f',
-                            ticksuffix='%'
-                        )
+                            ticksuffix='%',
+                            len=0.8
+                        ),
+                        lighting=dict(ambient=0.5, diffuse=0.5),
+                        hovertemplate='Strike: $%{x:.2f}<br>Days to Expiry: %{y:.1f}<br>IV: %{z:.1f}%<extra></extra>'
+                    )])
+                    fig_surf.update_layout(
+                        title=dict(
+                            text='3D Implied Volatility Surface',
+                            font=dict(color=text_color, size=22),
+                            x=0.5,
+                            xanchor='center'
+                        ),
+                        template=chart_template,
+                        height=600,
+                        plot_bgcolor=plot_bg_color,
+                        paper_bgcolor=paper_bg_color,
+                        font=dict(color=text_color, size=9),
+                        scene=dict(
+                            bgcolor=plot_bg_color,
+                            xaxis=dict(
+                                title=dict(
+                                    text='Strike ($)',
+                                    font=dict(color=axis_title_color, size=9)
+                                ),
+                                tickfont=dict(color=tick_color, size=8),
+                                gridcolor=grid_color
+                            ),
+                            yaxis=dict(
+                                title=dict(
+                                    text='Days',
+                                    font=dict(color=axis_title_color, size=9)
+                                ),
+                                tickfont=dict(color=tick_color, size=8),
+                                gridcolor=grid_color
+                            ),
+                            zaxis=dict(
+                                title=dict(
+                                    text='IV (%)',
+                                    font=dict(color=axis_title_color, size=9)
+                                ),
+                                tickfont=dict(color=tick_color, size=8),
+                                gridcolor=grid_color,
+                                tickformat='.0f',
+                                ticksuffix='%'
+                            )
+                        ),
+                        margin=dict(l=0, r=0, t=30, b=0)
                     )
-                )
-                st.plotly_chart(fig_surf, use_container_width=True)
-            
-            # Expiration range selector for 2D heatmap (Filtered by Sidebar)
-            
-            # Use global filtered data for volatility heatmaps
-            if selected_range_start and selected_range_end:
-                 df_greeks_vol = df_greeks_global[
-                    (df_greeks_global['expiry_str'] >= selected_range_start) & 
-                    (df_greeks_global['expiry_str'] <= selected_range_end)
-                 ].copy()
-            else:
-                 df_greeks_vol = df_greeks_global.copy()
-            
-            selected_expirations = sorted(df_greeks_vol['expiry'].unique())
-            filtered_df = df_greeks_vol
-            
-            # 2D Heatmap for selected expiration range
-            if not filtered_df.empty:
-                st.markdown(f"**2D Volatility Heatmap (Range: {selected_expirations[0]} to {selected_expirations[-1]})**")
+                    st.plotly_chart(fig_surf, use_container_width=True)
+
+            # Right column: 2D heatmaps stacked
+            with col_heatmaps:
+                # Use global filtered data for volatility heatmaps
+                if selected_range_start and selected_range_end:
+                     df_greeks_vol = df_greeks_global[
+                        (df_greeks_global['expiry_str'] >= selected_range_start) &
+                        (df_greeks_global['expiry_str'] <= selected_range_end)
+                     ].copy()
+                else:
+                     df_greeks_vol = df_greeks_global.copy()
+
+                selected_expirations = sorted(df_greeks_vol['expiry'].unique())
+                filtered_df = df_greeks_vol
+
+                # 2D Heatmap for selected expiration range
+                if not filtered_df.empty:
+                    st.markdown(f"")
                 
                 # Optimized heatmap generation using pivot tables (faster than nested loops)
                 df_calls = filtered_df[filtered_df['type'] == 'call']
@@ -794,82 +778,82 @@ if st.session_state['data']:
                 else:
                     iv_min, iv_max = 0, 100
                 
-                # Create two heatmaps side by side
-                heatmap_col1, heatmap_col2 = st.columns(2)
-                
-                with heatmap_col1:
-                    fig_heatmap_calls = go.Figure(data=go.Heatmap(
-                        z=z_calls,
-                        x=x_calls,
-                        y=y_calls,
-                        colorscale=heatmap_colorscale,
-                        zmin=iv_min,
-                        zmax=iv_max,
-                        colorbar=dict(
-                            title=dict(text='Call IV (%)', font=dict(color=axis_title_color)),
-                            tickfont=dict(color=tick_color),
-                            tickformat='.0f',
-                            ticksuffix='%'
-                        ),
-                        hovertemplate='Strike: %{y}<br>Expiry: %{x}<br>IV: %{z:.1f}%<extra></extra>'
-                    ))
-                    fig_heatmap_calls.update_layout(
-                        title='Call IV Heatmap',
-                        template=chart_template,
-                        height=600,
-                        yaxis_title='Strike Price ($)',
-                        xaxis_title='Expiration Date',
-                        plot_bgcolor=plot_bg_color,
-                        paper_bgcolor=paper_bg_color,
-                        font=dict(color=text_color),
-                        title_font=dict(color=text_color),
-                        xaxis=dict(
-                            title_font=dict(color=axis_title_color),
-                            tickfont=dict(color=tick_color)
-                        ),
-                        yaxis=dict(
-                            title_font=dict(color=axis_title_color),
-                            tickfont=dict(color=tick_color)
-                        )
-                    )
-                    call_heatmap_event = st.plotly_chart(fig_heatmap_calls, use_container_width=True, key="heatmap-call-iv", on_select="rerun", selection_mode="points")
-                
-                with heatmap_col2:
-                    fig_heatmap_puts = go.Figure(data=go.Heatmap(
-                        z=z_puts,
-                        x=x_puts,
-                        y=y_puts,
-                        colorscale=heatmap_colorscale,
-                        zmin=iv_min,
-                        zmax=iv_max,
-                        colorbar=dict(
-                            title=dict(text='Put IV (%)', font=dict(color=axis_title_color)),
-                            tickfont=dict(color=tick_color),
-                            tickformat='.0f',
-                            ticksuffix='%'
-                        ),
-                        hovertemplate='Strike: %{y}<br>Expiry: %{x}<br>IV: %{z:.1f}%<extra></extra>'
-                    ))
-                    fig_heatmap_puts.update_layout(
-                        title='Put IV Heatmap',
-                        template=chart_template,
-                        height=600,
-                        yaxis_title='Strike Price ($)',
-                        xaxis_title='Expiration Date',
-                        plot_bgcolor=plot_bg_color,
-                        paper_bgcolor=paper_bg_color,
-                        font=dict(color=text_color),
-                        title_font=dict(color=text_color),
-                        xaxis=dict(
-                            title_font=dict(color=axis_title_color),
-                            tickfont=dict(color=tick_color)
-                        ),
-                        yaxis=dict(
-                            title_font=dict(color=axis_title_color),
-                            tickfont=dict(color=tick_color)
-                        )
-                    )
-                    put_heatmap_event = st.plotly_chart(fig_heatmap_puts, use_container_width=True, key="heatmap-put-iv", on_select="rerun", selection_mode="points")
+                # Stack heatmaps vertically (calls on top, puts below)
+                fig_heatmap_calls = go.Figure(data=go.Heatmap(
+                    z=z_calls,
+                    x=x_calls,
+                    y=y_calls,
+                    colorscale=heatmap_colorscale,
+                    zmin=iv_min,
+                    zmax=iv_max,
+                    colorbar=dict(
+                        title=dict(text='Call IV (%)', font=dict(color=axis_title_color, size=9)),
+                        tickfont=dict(color=tick_color, size=8),
+                        tickformat='.0f',
+                        ticksuffix='%',
+                        len=0.6
+                    ),
+                    hovertemplate='Strike: %{y}<br>Expiry: %{x}<br>IV: %{z:.1f}%<extra></extra>'
+                ))
+                fig_heatmap_calls.update_layout(
+                    title=dict(text='Call Implied Volatility', font=dict(color=text_color, size=22), x=0.5, xanchor='center'),
+                    template=chart_template,
+                    height=285,
+                    yaxis_title='Strike ($)',
+                    xaxis_title='',
+                    plot_bgcolor=plot_bg_color,
+                    paper_bgcolor=paper_bg_color,
+                    font=dict(color=text_color, size=9),
+                    title_font=dict(color=text_color),
+                    xaxis=dict(
+                        title_font=dict(color=axis_title_color, size=9),
+                        tickfont=dict(color=tick_color, size=8)
+                    ),
+                    yaxis=dict(
+                        title_font=dict(color=axis_title_color, size=9),
+                        tickfont=dict(color=tick_color, size=8)
+                    ),
+                    margin=dict(l=50, r=10, t=30, b=20)
+                )
+                call_heatmap_event = st.plotly_chart(fig_heatmap_calls, use_container_width=True, key="heatmap-call-iv", on_select="rerun", selection_mode="points")
+
+                fig_heatmap_puts = go.Figure(data=go.Heatmap(
+                    z=z_puts,
+                    x=x_puts,
+                    y=y_puts,
+                    colorscale=heatmap_colorscale,
+                    zmin=iv_min,
+                    zmax=iv_max,
+                    colorbar=dict(
+                        title=dict(text='Put IV (%)', font=dict(color=axis_title_color, size=9)),
+                        tickfont=dict(color=tick_color, size=8),
+                        tickformat='.0f',
+                        ticksuffix='%',
+                        len=0.6
+                    ),
+                    hovertemplate='Strike: %{y}<br>Expiry: %{x}<br>IV: %{z:.1f}%<extra></extra>'
+                ))
+                fig_heatmap_puts.update_layout(
+                    title=dict(text='Put Implied Volatility', font=dict(color=text_color, size=22), x=0.5, xanchor='center'),
+                    template=chart_template,
+                    height=285,
+                    yaxis_title='Strike ($)',
+                    xaxis_title='Expiration',
+                    plot_bgcolor=plot_bg_color,
+                    paper_bgcolor=paper_bg_color,
+                    font=dict(color=text_color, size=9),
+                    title_font=dict(color=text_color),
+                    xaxis=dict(
+                        title_font=dict(color=axis_title_color, size=9),
+                        tickfont=dict(color=tick_color, size=8)
+                    ),
+                    yaxis=dict(
+                        title_font=dict(color=axis_title_color, size=9),
+                        tickfont=dict(color=tick_color, size=8)
+                    ),
+                    margin=dict(l=50, r=10, t=30, b=40)
+                )
+                put_heatmap_event = st.plotly_chart(fig_heatmap_puts, use_container_width=True, key="heatmap-put-iv", on_select="rerun", selection_mode="points")
                 
                 # Capture selection events from heatmaps to update selected date
                 # Check for selections in call heatmap using return value
@@ -1033,37 +1017,20 @@ if st.session_state['data']:
         st.markdown("#### Liquidity Walls: Open Interest & Volume")
         with st.expander("Understanding Open Interest vs Volume", expanded=False):
             st.markdown("""
-            **Open Interest (OI)** and **Volume** are both important metrics, but they tell you different stories:
-            
-            **Open Interest (OI):**
-            - **What it is:** The total number of option contracts that are currently "open" (not yet closed or expired)
-            - **Think of it as:** The size of the "wall" - how many contracts are sitting at each strike price
-            - **Key insight:** High OI at a strike creates a "magnet" effect - the stock price often gets pinned to that level near expiration
-            - **Changes when:** New positions are opened OR existing positions are closed (closing reduces OI)
-            - **Use it to:** Identify support/resistance levels, find where "max pain" might occur at expiration
-            
-            **Volume:**
-            - **What it is:** The number of contracts traded during a specific time period (today, this week, etc.)
-            - **Think of it as:** The "activity" - how much trading is happening right now
-            - **Key insight:** High volume shows where smart money is placing NEW bets or closing positions
-            - **Changes every day:** Resets to zero each period - tells you what's happening NOW
-            - **Use it to:** Identify unusual activity, find where institutions are positioning, spot potential breakouts
-            
-            **How They Work Together:**
-            - **High OI + High Volume:** Strong conviction - lots of existing positions being actively traded
-            - **High OI + Low Volume:** Stale positions - walls are established but not much new activity
-            - **Low OI + High Volume:** New positioning - fresh bets being placed that could move the market
-            
-            **Trading Application:**
-            - **Open Interest Walls:** Look for strikes with massive OI - these act as support/resistance
-            - **Volume Spikes:** Look for unusual volume - this shows where the "whales" are trading right now
-            
-            **Example Scenarios:**
-            - **Scenario 1:** Stock at `$150`, massive put OI at `$145`, low volume. The `$145` level acts as strong support due to dealer hedging, even without new trading activity.
-            - **Scenario 2:** Stock at `$150`, small OI at `$155`, sudden high volume. This indicates new bullish positioning - smart money is betting on a move to `$155+`.
-            - **Scenario 3:** Stock approaching `$160` at expiration, with high call OI and increasing volume. Dealers hedge by selling stock, creating resistance that may pin the price below `$160`.
-            
-            **Key Takeaway:** Combine OI and Volume analysis to identify both established support/resistance levels (OI) and emerging positioning (Volume).
+            **Open Interest (OI)** and **Volume** measure different aspects of options market activity:
+
+            **Open Interest:** Total contracts currently open at each strike.
+            - **What to Look For:** High OI creates "walls" - the stock often gets pinned to these strikes near expiration due to dealer hedging.
+            - **Use Case:** Identifies established support/resistance levels. Strikes with massive OI act as magnets.
+
+            **Volume:** Contracts traded today (resets daily).
+            - **What to Look For:** Spikes show where smart money is actively positioning right now.
+            - **Use Case:** Identifies emerging trends and unusual institutional activity.
+
+            **Combined Analysis:**
+            - **High OI + High Volume:** Strong conviction at this level
+            - **High OI + Low Volume:** Established wall, no new activity
+            - **Low OI + High Volume:** Fresh positioning that could move the market
             """)
         
         if "greeks" in data and data["greeks"]:
@@ -1164,93 +1131,113 @@ if st.session_state['data']:
                     # Convert dates to strings for display
                     all_x_values = [x.strftime('%Y-%m-%d') if hasattr(x, 'strftime') else str(x) for x in all_x_values]
                 
-                # Open Interest Chart (full width)
-                st.markdown("**Open Interest**")
-                fig_oi = go.Figure()
-                fig_oi.add_trace(go.Bar(
-                    x=all_x_values,
-                    y=call_oi_values,
-                    name='Call OI',
-                    marker_color=call_color,
-                    opacity=1.0
-                ))
-                fig_oi.add_trace(go.Bar(
-                    x=all_x_values,
-                    y=[-oi for oi in put_oi_values],  # Negative for below
-                    name='Put OI',
-                    marker_color=put_color,
-                    opacity=1.0
-                ))
-                fig_oi.update_layout(
-                    barmode='overlay',
-                    title=f"Open Interest by {x_axis_option}",
-                    template=chart_template,
-                    height=400,
-                    xaxis_title=x_axis_title,
-                    yaxis_title='Open Interest (Contracts)',
-                    showlegend=True,
-                    hovermode='x unified',
-                    plot_bgcolor=plot_bg_color,
-                    paper_bgcolor=paper_bg_color,
-                    font=dict(color=text_color),
-                    title_font=dict(color=text_color),
-                    xaxis=dict(
-                        title_font=dict(color=axis_title_color),
-                        tickfont=dict(color=tick_color)
-                    ),
-                    yaxis=dict(
-                        title_font=dict(color=axis_title_color),
-                        tickfont=dict(color=tick_color)
-                    ),
-                    legend=dict(font=dict(color=legend_color))
-                )
-                if x_axis_option == "Expiration Date":
-                    fig_oi.update_layout(xaxis=dict(tickangle=-45))
-                oi_event = st.plotly_chart(fig_oi, use_container_width=True, key="oi-range-chart", on_select="rerun", selection_mode="points")
-                
-                # Volume Chart (full width)
-                st.markdown("**Volume**")
-                fig_vol = go.Figure()
-                fig_vol.add_trace(go.Bar(
-                    x=all_x_values,
-                    y=call_vol_values,
-                    name='Call Volume',
-                    marker_color=call_color,
-                    opacity=1.0
-                ))
-                fig_vol.add_trace(go.Bar(
-                    x=all_x_values,
-                    y=[-vol for vol in put_vol_values],  # Negative for below
-                    name='Put Volume',
-                    marker_color=put_color,
-                    opacity=1.0
-                ))
-                fig_vol.update_layout(
-                    barmode='overlay',
-                    title=f"Volume by {x_axis_option}",
-                    template=chart_template,
-                    height=400,
-                    xaxis_title=x_axis_title,
-                    yaxis_title='Volume (Contracts)',
-                    showlegend=True,
-                    hovermode='x unified',
-                    plot_bgcolor=plot_bg_color,
-                    paper_bgcolor=paper_bg_color,
-                    font=dict(color=text_color),
-                    title_font=dict(color=text_color),
-                    xaxis=dict(
-                        title_font=dict(color=axis_title_color),
-                        tickfont=dict(color=tick_color)
-                    ),
-                    yaxis=dict(
-                        title_font=dict(color=axis_title_color),
-                        tickfont=dict(color=tick_color)
-                    ),
-                    legend=dict(font=dict(color=legend_color))
-                )
-                if x_axis_option == "Expiration Date":
-                    fig_vol.update_layout(xaxis=dict(tickangle=-45))
-                vol_event = st.plotly_chart(fig_vol, use_container_width=True, key="vol-range-chart", on_select="rerun", selection_mode="points")
+                # Open Interest and Volume Charts side-by-side
+                # Width parameter depends on x-axis type (numeric vs categorical)
+                bar_width = None if x_axis_option == "Expiration Date" else 1.6
+
+                col_oi, col_vol = st.columns(2)
+
+                with col_oi:
+                    st.markdown("**Open Interest**")
+                    fig_oi = go.Figure()
+                    fig_oi.add_trace(go.Bar(
+                        x=all_x_values,
+                        y=call_oi_values,
+                        name='Call OI',
+                        marker_color=call_color,
+                        opacity=1.0,
+                        width=bar_width
+                    ))
+                    fig_oi.add_trace(go.Bar(
+                        x=all_x_values,
+                        y=[-oi for oi in put_oi_values],  # Negative for below
+                        name='Put OI',
+                        marker_color=put_color,
+                        opacity=1.0,
+                        width=bar_width
+                    ))
+                    fig_oi.update_layout(
+                        barmode='overlay',
+                        title=dict(
+                            text=f"Open Interest by {x_axis_option}<br><sub>Total contracts open at each level (support/resistance walls)</sub>",
+                            font=dict(color=text_color, size=20),
+                            x=0.5,
+                            xanchor='center'
+                        ),
+                        template=chart_template,
+                        height=400,
+                        xaxis_title=x_axis_title,
+                        yaxis_title='OI (Contracts)',
+                        showlegend=True,
+                        hovermode='x unified',
+                        plot_bgcolor=plot_bg_color,
+                        paper_bgcolor=paper_bg_color,
+                        font=dict(color=text_color),
+                        title_font=dict(color=text_color),
+                        xaxis=dict(
+                            title_font=dict(color=axis_title_color),
+                            tickfont=dict(color=tick_color)
+                        ),
+                        yaxis=dict(
+                            title_font=dict(color=axis_title_color),
+                            tickfont=dict(color=tick_color)
+                        ),
+                        legend=dict(font=dict(color=legend_color))
+                    )
+                    if x_axis_option == "Expiration Date":
+                        fig_oi.update_layout(xaxis=dict(tickangle=-45))
+                    oi_event = st.plotly_chart(fig_oi, use_container_width=True, key="oi-range-chart", on_select="rerun", selection_mode="points")
+
+                with col_vol:
+                    st.markdown("**Volume**")
+                    fig_vol = go.Figure()
+                    fig_vol.add_trace(go.Bar(
+                        x=all_x_values,
+                        y=call_vol_values,
+                        name='Call Volume',
+                        marker_color=call_color,
+                        opacity=1.0,
+                        width=bar_width
+                    ))
+                    fig_vol.add_trace(go.Bar(
+                        x=all_x_values,
+                        y=[-vol for vol in put_vol_values],  # Negative for below
+                        name='Put Volume',
+                        marker_color=put_color,
+                        opacity=1.0,
+                        width=bar_width
+                    ))
+                    fig_vol.update_layout(
+                        barmode='overlay',
+                        title=dict(
+                            text=f"Volume by {x_axis_option}<br><sub>Contracts traded today (current activity & positioning)</sub>",
+                            font=dict(color=text_color, size=20),
+                            x=0.5,
+                            xanchor='center'
+                        ),
+                        template=chart_template,
+                        height=400,
+                        xaxis_title=x_axis_title,
+                        yaxis_title='Volume (Contracts)',
+                        showlegend=True,
+                        hovermode='x unified',
+                        plot_bgcolor=plot_bg_color,
+                        paper_bgcolor=paper_bg_color,
+                        font=dict(color=text_color),
+                        title_font=dict(color=text_color),
+                        xaxis=dict(
+                            title_font=dict(color=axis_title_color),
+                            tickfont=dict(color=tick_color)
+                        ),
+                        yaxis=dict(
+                            title_font=dict(color=axis_title_color),
+                            tickfont=dict(color=tick_color)
+                        ),
+                        legend=dict(font=dict(color=legend_color))
+                    )
+                    if x_axis_option == "Expiration Date":
+                        fig_vol.update_layout(xaxis=dict(tickangle=-45))
+                    vol_event = st.plotly_chart(fig_vol, use_container_width=True, key="vol-range-chart", on_select="rerun", selection_mode="points")
                 
                 # Capture selection events from Liquidity Range Charts (when X-axis is Expiration Date)
                 # Use the return value from st.plotly_chart which contains the selection data
@@ -1368,7 +1355,25 @@ if st.session_state['data']:
                          selected_date = None
 
                 if selected_date:
-                    st.markdown(f"### Strike-Level Analysis for Selected Date: {selected_date}")
+                    # Title and date selector on same row
+                    strike_title_col, strike_date_col = st.columns([2, 1])
+                    with strike_title_col:
+                        st.markdown("### Strike-Level Analysis for Selected Date")
+                    with strike_date_col:
+                        if available_dates_in_range:
+                            # Default to current selection or first date
+                            default_date = selected_date if selected_date in available_dates_in_range else available_dates_in_range[0]
+
+                            selected_date = st.select_slider(
+                                "Select Date",
+                                options=available_dates_in_range,
+                                value=default_date,
+                                key="selected_exp_date_inline",
+                                help="Select specific expiration date for detailed strike-level analysis.",
+                                label_visibility="collapsed"
+                            )
+                            # Sync back to session state
+                            st.session_state['selected_date_from_chart'] = selected_date
                     
                     # Filter data for selected date - STRIKE PRICE ANALYSIS ONLY
                     selected_date_data = df_range[df_range['expiry_date'].dt.strftime('%Y-%m-%d') == selected_date]
@@ -1408,7 +1413,6 @@ if st.session_state['data']:
                     col_oi, col_vol = st.columns(2)
                     
                     with col_oi:
-                        st.markdown("**Open Interest by Strike**")
                         fig_oi_by_strike = go.Figure()
                         fig_oi_by_strike.add_trace(go.Bar(
                             x=all_strikes,
@@ -1450,7 +1454,6 @@ if st.session_state['data']:
                         st.plotly_chart(fig_oi_by_strike, use_container_width=True, key=oi_selected_key)
                     
                     with col_vol:
-                        st.markdown("**Volume by Strike**")
                         fig_vol_by_strike = go.Figure()
                         fig_vol_by_strike.add_trace(go.Bar(
                             x=all_strikes,
@@ -1493,24 +1496,20 @@ if st.session_state['data']:
                     
                     # Add Greeks Slice Analysis
                     st.markdown("---")
-                    st.markdown("#### Greeks Slice Analysis (Synced)")
+                    st.markdown("#### Greeks Slice Analysis for Selected Date")
                     with st.expander("How to Use This Chart", expanded=False):
                         st.markdown("""
                         The Greeks measure the risk of a specific options contract at different strike prices.
                         
                         **Delta:** Measures direction risk - how much the option price changes for each `$1` move in the stock.
                         - **Range:** Calls (0 to 1), Puts (-1 to 0)
-                        - **Example Scenario:** A call with Delta `0.75` will gain `$0.75` for every `$1` the stock moves up. If you own `10` contracts, that's `$750` profit per `$1` move.
                         - **What to Look For:** Higher Delta = more stock-like behavior. At-the-money options have Delta around `0.50`.
                         
                         **Gamma:** Measures acceleration risk - how quickly Delta changes as the stock moves.
-                        - **Example Scenario:** An option with high Gamma sees its Delta jump from `0.50` to `0.80` after a `$2` stock move, causing the option price to accelerate faster.
                         - **What to Look For:** Peak Gamma at-the-money means Delta changes fastest when stock is near the strike. This creates volatility in option prices.
                         
                         **Theta:** Measures time decay - how much value the option loses each day.
-                        - **Example Scenario:** An option with Theta of `-0.10` loses `$0.10` per day. Over `10` days, you lose `$1.00` even if stock doesn't move.
                         - **What to Look For:** Time decay accelerates as expiration approaches. Options with less time to expiration have higher absolute Theta values.
-                        - **Trading Application:** Sellers profit from Theta decay, buyers need stock movement to overcome time decay.
                         """)
                     
                     selected_type = st.radio("Option Type", ["call", "put"], horizontal=True, key="greeks_type_selected_date", help=get_tooltip("Option Type"))
@@ -1525,10 +1524,14 @@ if st.session_state['data']:
                             # 1. Create Subplots: 1 Row, 3 Columns
                             # shared_xaxes=True is the magic switch that links the hover interaction
                             fig_greeks = make_subplots(
-                                rows=1, 
-                                cols=3, 
-                                shared_xaxes=True, 
-                                subplot_titles=("Delta", "Gamma", "Theta"),
+                                rows=1,
+                                cols=3,
+                                shared_xaxes=True,
+                                subplot_titles=(
+                                    "Delta<br><sub>Option price change per $1 stock move</sub>",
+                                    "Gamma<br><sub>Rate of Delta change (acceleration risk)</sub>",
+                                    "Theta<br><sub>Daily time decay ($/day lost)</sub>"
+                                ),
                                 horizontal_spacing=0.05
                             )
 
