@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from scipy.stats import norm
 
 # internal
@@ -61,6 +62,247 @@ def get_chart_theme_colors() -> dict:
         'plot_bg_color': 'rgba(255,255,255,0)',
         'paper_bg_color': 'rgba(255,255,255,0)'
     }
+
+def create_xaxis_sync_script(chart_keys: list) -> str:
+    """
+    Creates JavaScript to synchronize x-axis zoom/pan between charts.
+    Uses Plotly's relayout event to sync xaxis.range.
+    
+    Args:
+        chart_keys: List of Streamlit chart keys to synchronize
+        
+    Returns:
+        HTML string containing JavaScript code
+    """
+    script = f"""
+    <script>
+    (function() {{
+        const chartKeys = {chart_keys};
+        let isSyncing = false;
+        
+        function waitForCharts() {{
+            const charts = [];
+            chartKeys.forEach(key => {{
+                // Streamlit creates divs with data-testid containing the key
+                const div = document.querySelector(`[data-testid*="${{key}}"]`);
+                if (div) {{
+                    // Find the actual Plotly div (usually a child)
+                    const plotlyDiv = div.querySelector('.js-plotly-plot') || div;
+                    if (plotlyDiv && plotlyDiv.data) {{
+                        charts.push({{key: key, div: plotlyDiv}});
+                    }}
+                }}
+            }});
+            
+            if (charts.length === chartKeys.length) {{
+                setupSync(charts);
+            }} else {{
+                setTimeout(waitForCharts, 100);
+            }}
+        }}
+        
+        function setupSync(charts) {{
+            charts.forEach(({{key, div}}) => {{
+                div.on('plotly_relayout', function(eventData) {{
+                    if (isSyncing) return;
+                    
+                    // Check if x-axis range changed
+                    if (eventData['xaxis.range[0]'] !== undefined && 
+                        eventData['xaxis.range[1]'] !== undefined) {{
+                        
+                        isSyncing = true;
+                        const xRange = [
+                            eventData['xaxis.range[0]'],
+                            eventData['xaxis.range[1]']
+                        ];
+                        
+                        // Sync to all other charts
+                        charts.forEach(({{div: targetDiv}}) => {{
+                            if (targetDiv !== div && targetDiv.data) {{
+                                Plotly.relayout(targetDiv, {{
+                                    'xaxis.range': xRange
+                                }});
+                            }}
+                        }});
+                        
+                        setTimeout(() => {{ isSyncing = false; }}, 50);
+                    }}
+                }});
+            }});
+        }}
+        
+        // Start waiting for charts after a short delay
+        setTimeout(waitForCharts, 500);
+    }})();
+    </script>
+    """
+    return script
+
+def create_hover_sync_script(chart_keys: list) -> str:
+    """
+    Creates JavaScript to synchronize hover events between charts.
+    When hovering on one chart, highlights the same x-value on other charts.
+    Improved version for line and bar charts with better matching.
+    
+    Args:
+        chart_keys: List of Streamlit chart keys to synchronize
+        
+    Returns:
+        HTML string containing JavaScript code
+    """
+    script = f"""
+    <script>
+    (function() {{
+        const chartKeys = {chart_keys};
+        // Support Streamlit iframe embedding by targeting parent document when available
+        const rootDoc = (window.parent && window.parent.document) ? window.parent.document : document;
+        let hoverTimeout;
+        let isHovering = false;
+        
+        function findChartDiv(key) {{
+            // Try multiple strategies to find the chart
+            // Strategy 1: Look for data-testid containing the key
+            let div = rootDoc.querySelector(`[data-testid*="${{key}}"]`);
+            if (div) {{
+                let plotlyDiv = div.querySelector('.js-plotly-plot');
+                if (plotlyDiv && plotlyDiv.data) return plotlyDiv;
+            }}
+            
+            // Strategy 2: Look for stPlotlyChart with key attribute
+            div = rootDoc.querySelector(`[data-testid="stPlotlyChart"]`);
+            if (div) {{
+                // Find all plotly charts and match by checking nearby elements
+                const allCharts = rootDoc.querySelectorAll('.js-plotly-plot');
+                for (let chart of allCharts) {{
+                    // Check if this chart is near a container that might have our key
+                    let parent = chart.closest('[data-testid]');
+                    if (parent && parent.getAttribute('data-testid').includes(key)) {{
+                        if (chart.data) return chart;
+                    }}
+                }}
+            }}
+            
+            return null;
+        }}
+
+        // Fallback: map charts by their order of appearance when keys are missing in DOM
+        function mapChartsByOrder() {{
+            const allCharts = Array.from(rootDoc.querySelectorAll('.js-plotly-plot'));
+            if (allCharts.length >= chartKeys.length) {{
+                const lastCharts = allCharts.slice(-chartKeys.length);
+                return lastCharts.map((div, idx) => ({{
+                    key: chartKeys[idx],
+                    div: div,
+                    index: idx
+                }}));
+            }}
+            return [];
+        }}
+        
+        function waitForCharts() {{
+            const charts = [];
+            chartKeys.forEach((key, index) => {{
+                const plotlyDiv = findChartDiv(key);
+                if (plotlyDiv && plotlyDiv.data && plotlyDiv.data.length > 0) {{
+                    charts.push({{key: key, div: plotlyDiv, index: index}});
+                }}
+            }});
+            
+            // If direct lookup failed, fall back to ordered mapping
+            if (charts.length !== chartKeys.length) {{
+                const orderedCharts = mapChartsByOrder();
+                if (orderedCharts.length === chartKeys.length) {{
+                    console.log('Falling back to ordered chart mapping for hover sync');
+                    setupHoverSync(orderedCharts);
+                    return;
+                }}
+            }}
+
+            // If we found all charts, set them up
+            if (charts.length === chartKeys.length) {{
+                console.log('Found all charts for hover sync:', charts.map(c => c.key));
+                setupHoverSync(charts);
+            }} else {{
+                // Try again after a delay
+                setTimeout(waitForCharts, 200);
+            }}
+        }}
+        
+        function setupHoverSync(charts) {{
+            console.log('Setting up hover sync for', charts.length, 'charts');
+            
+            charts.forEach(({{key, div}}) => {{
+                console.log('Attaching hover listener to chart:', key);
+                
+                div.on('plotly_hover', function(eventData) {{
+                    if (!eventData || !eventData.points || eventData.points.length === 0) return;
+                    if (isHovering) return;
+                    
+                    clearTimeout(hoverTimeout);
+                    isHovering = true;
+                    const point = eventData.points[0];
+                    const pointNum = point.pointNumber;
+                    const curveNum = point.curveNumber;
+                    
+                    console.log('Hover detected on', key, 'pointNumber:', pointNum, 'x:', point.x);
+                    
+                    // Sync hover to all other charts using pointNumber
+                    charts.forEach(({{div: targetDiv, key: targetKey}}) => {{
+                        if (targetDiv !== div && targetDiv.data && targetDiv.data.length > 0) {{
+                            try {{
+                                // Use the same pointNumber for the first trace (curveNumber: 0)
+                                // Since all charts have the same x-values (strike prices)
+                                if (window.parent && window.parent.Plotly) {{
+                                    window.parent.Plotly.Fx.hover(targetDiv, [
+                                        {{ curveNumber: 0, pointNumber: pointNum }}
+                                    ]);
+                                    console.log('Synced hover to', targetKey, 'pointNumber:', pointNum);
+                                }} else if (window.Plotly) {{
+                                    window.Plotly.Fx.hover(targetDiv, [
+                                        {{ curveNumber: 0, pointNumber: pointNum }}
+                                    ]);
+                                }}
+                            }} catch(e) {{
+                                console.error('Hover sync error on', targetKey, ':', e);
+                            }}
+                        }}
+                    }});
+                    
+                    setTimeout(() => {{ isHovering = false; }}, 100);
+                }});
+                
+                div.on('plotly_unhover', function(eventData) {{
+                    if (hoverTimeout) clearTimeout(hoverTimeout);
+                    // Only clear the isHovering flag, don't force-unhover other charts
+                    // Let natural mouse movement handle unhover on other charts
+                    hoverTimeout = setTimeout(() => {{
+                        isHovering = false;
+                    }}, 300);
+                }});
+            }});
+        }}
+        
+        // Use MutationObserver to detect when charts are added to DOM
+        const observer = new MutationObserver(function(mutations) {{
+            waitForCharts();
+        }});
+        
+        if (rootDoc && rootDoc.body) {{
+            observer.observe(rootDoc.body, {{
+                childList: true,
+                subtree: true
+            }});
+        }}
+        
+        // Also try immediately and after delays
+        waitForCharts();
+        setTimeout(waitForCharts, 500);
+        setTimeout(waitForCharts, 1000);
+        setTimeout(waitForCharts, 2000);
+    }})();
+    </script>
+    """
+    return script
 
 # --- HELPER FUNCTIONS ---
 def calculate_gex_profile(df_greeks: pd.DataFrame, spot_price: float) -> pd.DataFrame:
@@ -313,6 +555,12 @@ if analyze_btn:
             if resp_hist.status_code == 200:
                 hist_json = resp_hist.json()
                 st.session_state['historical_price'] = pd.DataFrame(hist_json.get('data', hist_json))
+            
+            # Reset filters when new data is loaded
+            if "selected_range_from_state" in st.session_state:
+                del st.session_state["selected_range_from_state"]
+            if "selected_date_from_chart" in st.session_state:
+                del st.session_state["selected_date_from_chart"]
                 
         except Exception as e:
             st.error(f"Error connecting to backend: {e}")
@@ -339,6 +587,84 @@ if st.session_state['data']:
     paper_bg_color = theme_colors['paper_bg_color']
     
     # --- MAIN DASHBOARD ---
+    
+    # Pre-process Greeks data for global use
+    df_greeks_global = pd.DataFrame()
+    all_dates_str = []
+    if "greeks" in data and data["greeks"]:
+        df_greeks_global = pd.DataFrame(data["greeks"])
+        # Ensure expiry is standardized YYYY-MM-DD
+        df_greeks_global['expiry_dt'] = pd.to_datetime(df_greeks_global['expiry'])
+        df_greeks_global['expiry_str'] = df_greeks_global['expiry_dt'].dt.strftime('%Y-%m-%d')
+        all_dates_str = sorted(df_greeks_global['expiry_str'].unique())
+
+    # Sidebar Range Slider
+    selected_range_start = None
+    selected_range_end = None
+    selected_date_sidebar = None
+    
+    if all_dates_str:
+        st.sidebar.markdown("---")
+        st.sidebar.header("Global Filters")
+        
+        # Default to full range
+        start_default, end_default = all_dates_str[0], all_dates_str[-1]
+        
+        # Check if we have a saved range in session state and VALIDATE it against current options
+        if "selected_range_from_state" in st.session_state:
+            saved_range = st.session_state["selected_range_from_state"]
+            # Reset if saved range is not valid for current dates
+            if (isinstance(saved_range, tuple) and len(saved_range) == 2 and 
+                (saved_range[0] not in all_dates_str or saved_range[1] not in all_dates_str)):
+                st.session_state["selected_range_from_state"] = (start_default, end_default)
+        else:
+             st.session_state["selected_range_from_state"] = (start_default, end_default)
+        
+        # Use the saved range directly without button controls
+        saved_range = st.session_state["selected_range_from_state"]
+
+        select_range = st.sidebar.select_slider(
+            "Expiration Date Range",
+            options=all_dates_str,
+            value=st.session_state["selected_range_from_state"],
+            key="expiration_range_slider",
+            help="Filter all charts by expiration date range."
+        )
+        selected_range_start, selected_range_end = select_range
+        
+        # Update session state
+        st.session_state["selected_range_from_state"] = select_range
+        
+        # Filter dates available for specific selection based on range
+        available_dates_in_range = [d for d in all_dates_str if selected_range_start <= d <= selected_range_end]
+        
+        # Initialize sidebar selection with session state if set by chart click
+        if 'selected_date_from_chart' not in st.session_state:
+             # Default to first available date if nothing selected yet
+            st.session_state['selected_date_from_chart'] = available_dates_in_range[0] if available_dates_in_range else None
+        
+        # Verify stored date is actually in the available range (e.g. if range changed)
+        if st.session_state['selected_date_from_chart'] not in available_dates_in_range:
+             st.session_state['selected_date_from_chart'] = available_dates_in_range[0] if available_dates_in_range else None
+        
+        # Determine index for selectbox
+        sidebar_index = 0
+        if st.session_state['selected_date_from_chart'] in available_dates_in_range:
+             sidebar_index = available_dates_in_range.index(st.session_state['selected_date_from_chart'])
+        
+        if available_dates_in_range:
+            selected_date_sidebar = st.sidebar.selectbox(
+                "Detailed Analysis Date",
+                available_dates_in_range,
+                key="selected_exp_date_sidebar",
+                index=sidebar_index,
+                help="Select specific expiration date for detailed strike-level analysis (Greeks, OI breakdown)."
+            )
+            # Sync back to session state to keep them in sync
+            st.session_state['selected_date_from_chart'] = selected_date_sidebar
+            # Also auto-populate global selected_date variable for use in charts below
+            selected_date = selected_date_sidebar
+    
     # --- Top Row Metrics: Comparative Market Pulse ---
     c1, c2 = st.columns(2)
     with c1:
@@ -546,55 +872,52 @@ if st.session_state['data']:
                 )
                 st.plotly_chart(fig_surf, use_container_width=True)
             
-            # Expiration range selector for 2D heatmap
-            st.markdown("---")
-            st.markdown("**Configure Range Analysis**")
-            col_vol1, col_vol2 = st.columns(2)
-            with col_vol1:
-                start_exp_idx = st.selectbox("Start Expiration", range(len(expirations)), format_func=lambda x: expirations[x], key="vol_start_exp", index=0, help=get_tooltip("Start Expiration"))
-            with col_vol2:
-                end_exp_idx = st.selectbox("End Expiration", range(len(expirations)), format_func=lambda x: expirations[x], key="vol_end_exp", index=min(4, len(expirations)-1), help=get_tooltip("End Expiration"))
+            # Expiration range selector for 2D heatmap (Filtered by Sidebar)
             
-            selected_expirations = expirations[start_exp_idx:end_exp_idx+1]
-            filtered_df = df_greeks[df_greeks['expiry'].isin(selected_expirations)].copy()
+            # Use global filtered data for volatility heatmaps
+            if selected_range_start and selected_range_end:
+                 df_greeks_vol = df_greeks_global[
+                    (df_greeks_global['expiry_str'] >= selected_range_start) & 
+                    (df_greeks_global['expiry_str'] <= selected_range_end)
+                 ].copy()
+            else:
+                 df_greeks_vol = df_greeks_global.copy()
+            
+            selected_expirations = sorted(df_greeks_vol['expiry'].unique())
+            filtered_df = df_greeks_vol
             
             # 2D Heatmap for selected expiration range
-            st.markdown(f"**2D Volatility Heatmap (Range: {selected_expirations[0]} to {selected_expirations[-1]})**")
             if not filtered_df.empty:
-                # Create heatmap: strikes on Y-axis, expirations on X-axis, color = IV
-                # We'll show Call IV and Put IV separately, or average IV
-                all_strikes = sorted(filtered_df['strike'].unique())
-                all_expirations = sorted(selected_expirations)
+                st.markdown(f"**2D Volatility Heatmap (Range: {selected_expirations[0]} to {selected_expirations[-1]})**")
                 
-                # Create IV matrix: rows = strikes, cols = expirations
-                iv_matrix_calls = []
-                iv_matrix_puts = []
+                # Optimized heatmap generation using pivot tables (faster than nested loops)
+                df_calls = filtered_df[filtered_df['type'] == 'call']
+                df_puts = filtered_df[filtered_df['type'] == 'put']
                 
-                for strike in all_strikes:
-                    row_calls = []
-                    row_puts = []
-                    for exp in all_expirations:
-                        call_data = filtered_df[(filtered_df['strike'] == strike) & (filtered_df['expiry'] == exp) & (filtered_df['type'] == 'call')]
-                        put_data = filtered_df[(filtered_df['strike'] == strike) & (filtered_df['expiry'] == exp) & (filtered_df['type'] == 'put')]
-                        
-                        call_iv = call_data['iv'].values[0] if not call_data.empty and len(call_data['iv'].values) > 0 else None
-                        put_iv = put_data['iv'].values[0] if not put_data.empty and len(put_data['iv'].values) > 0 else None
-                        
-                        # Convert from decimal to percentage (multiply by 100)
-                        row_calls.append(call_iv * 100 if call_iv is not None else None)
-                        row_puts.append(put_iv * 100 if put_iv is not None else None)
-                    
-                    iv_matrix_calls.append(row_calls)
-                    iv_matrix_puts.append(row_puts)
+                pivot_calls = df_calls.pivot_table(index='strike', columns='expiry', values='iv', aggfunc='mean')
+                pivot_puts = df_puts.pivot_table(index='strike', columns='expiry', values='iv', aggfunc='mean')
+                
+                # Ensure sorted axes
+                pivot_calls = pivot_calls.reindex(index=sorted(pivot_calls.index), columns=sorted(pivot_calls.columns))
+                pivot_puts = pivot_puts.reindex(index=sorted(pivot_puts.index), columns=sorted(pivot_puts.columns))
+                
+                # Extract values for Plotly (convert to % and replace NaN with None for clean hover)
+                z_calls = pivot_calls.mul(100).where(~pivot_calls.isna(), None).values.tolist()
+                z_puts = pivot_puts.mul(100).where(~pivot_puts.isna(), None).values.tolist()
+                
+                x_calls = [pd.to_datetime(x).strftime('%Y-%m-%d') if not isinstance(x, str) else x[:10] for x in pivot_calls.columns]
+                x_puts = [pd.to_datetime(x).strftime('%Y-%m-%d') if not isinstance(x, str) else x[:10] for x in pivot_puts.columns]
+                y_calls = [f"${s:.0f}" for s in pivot_calls.index]
+                y_puts = [f"${s:.0f}" for s in pivot_puts.index]
                 
                 # Create two heatmaps side by side
                 heatmap_col1, heatmap_col2 = st.columns(2)
                 
                 with heatmap_col1:
                     fig_heatmap_calls = go.Figure(data=go.Heatmap(
-                        z=iv_matrix_calls,
-                        x=[exp[:10] for exp in all_expirations],  # Shorten date format
-                        y=[f"${s:.0f}" for s in all_strikes],
+                        z=z_calls,
+                        x=x_calls,
+                        y=y_calls,
                         colorscale=heatmap_colorscale,
                         colorbar=dict(
                             title=dict(text='Call IV (%)', font=dict(color=axis_title_color)),
@@ -623,13 +946,13 @@ if st.session_state['data']:
                             tickfont=dict(color=tick_color)
                         )
                     )
-                    st.plotly_chart(fig_heatmap_calls, use_container_width=True)
+                    st.plotly_chart(fig_heatmap_calls, use_container_width=True, key="heatmap-call-iv", on_select="rerun", selection_mode="points")
                 
                 with heatmap_col2:
                     fig_heatmap_puts = go.Figure(data=go.Heatmap(
-                        z=iv_matrix_puts,
-                        x=[exp[:10] for exp in all_expirations],
-                        y=[f"${s:.0f}" for s in all_strikes],
+                        z=z_puts,
+                        x=x_puts,
+                        y=y_puts,
                         colorscale=heatmap_colorscale,
                         colorbar=dict(
                             title=dict(text='Put IV (%)', font=dict(color=axis_title_color)),
@@ -658,7 +981,133 @@ if st.session_state['data']:
                             tickfont=dict(color=tick_color)
                         )
                     )
-                    st.plotly_chart(fig_heatmap_puts, use_container_width=True)
+                    st.plotly_chart(fig_heatmap_puts, use_container_width=True, key="heatmap-put-iv", on_select="rerun", selection_mode="points")
+                
+                # Capture selection events from heatmaps to update selected date
+                # Check for selections in call heatmap
+                if "heatmap-call-iv" in st.session_state and st.session_state["heatmap-call-iv"].get("selection", {}).get("points"):
+                    points = st.session_state["heatmap-call-iv"]["selection"]["points"]
+                    if points:
+                        selected_x = points[0].get("x")
+                        # x is expiration date string or timestamp, ensure format
+                        if selected_x:
+                            # Try to parse if it comes as full datetime string, otherwise assume YYYY-MM-DD
+                             try:
+                                 clicked_date = pd.to_datetime(selected_x).strftime('%Y-%m-%d')
+                                 if clicked_date in all_dates_str:
+                                     st.session_state['selected_date_from_chart'] = clicked_date
+                             except:
+                                 pass
+
+                # Check for selections in put heatmap
+                if "heatmap-put-iv" in st.session_state and st.session_state["heatmap-put-iv"].get("selection", {}).get("points"):
+                    points = st.session_state["heatmap-put-iv"]["selection"]["points"]
+                    if points:
+                        selected_x = points[0].get("x")
+                        if selected_x:
+                             try:
+                                 clicked_date = pd.to_datetime(selected_x).strftime('%Y-%m-%d')
+                                 if clicked_date in all_dates_str:
+                                     st.session_state['selected_date_from_chart'] = clicked_date
+                             except:
+                                 pass
+                
+                # Inject sync script for heatmaps (sync x-axis)
+                sync_script_heatmaps = create_xaxis_sync_script(["heatmap-call-iv", "heatmap-put-iv"])
+                components.html(sync_script_heatmaps, height=0)
+                
+                # Add specialized hover sync for heatmaps
+                heatmap_hover_sync = """
+                <script>
+                (function() {
+                    const chartKeys = ["heatmap-call-iv", "heatmap-put-iv"];
+                    const rootDoc = (window.parent && window.parent.document) ? window.parent.document : document;
+                    
+                    function findHeatmapDiv(key) {
+                        let div = rootDoc.querySelector(`[data-testid*="${key}"]`);
+                        if (div) {
+                            let plotlyDiv = div.querySelector('.js-plotly-plot');
+                            if (plotlyDiv && plotlyDiv.data) return plotlyDiv;
+                        }
+                        return null;
+                    }
+                    
+                    function setupHeatmapSync() {
+                        const charts = [];
+                        chartKeys.forEach(key => {
+                            const plotlyDiv = findHeatmapDiv(key);
+                            if (plotlyDiv && plotlyDiv.data && plotlyDiv.data.length > 0) {
+                                charts.push({key: key, div: plotlyDiv});
+                            }
+                        });
+                        
+                        if (charts.length === chartKeys.length) {
+                            charts.forEach(({key, div}) => {
+                                div.on('plotly_hover', function(eventData) {
+                                    if (!eventData || !eventData.points || eventData.points.length === 0) return;
+                                    
+                                    const point = eventData.points[0];
+                                    const xValue = point.x;
+                                    const yValue = point.y;
+                                    
+                                    // Sync hover to other heatmap using x,y coordinates
+                                    charts.forEach(({div: targetDiv, key: targetKey}) => {
+                                        if (targetDiv !== div && targetDiv.data && targetDiv.data.length > 0) {
+                                            try {
+                                                const data = targetDiv.data[0];
+                                                if (data.x && data.y && data.x.indexOf && data.y.indexOf) {
+                                                    const xIndex = data.x.indexOf(xValue);
+                                                    const yIndex = data.y.indexOf(yValue);
+                                                    if (xIndex >= 0 && yIndex >= 0) {
+                                                        if (window.parent && window.parent.Plotly) {
+                                                            window.parent.Plotly.Fx.hover(targetDiv, [
+                                                                {curveNumber: 0, pointNumber: [xIndex, yIndex]}
+                                                            ]);
+                                                        } else if (window.Plotly) {
+                                                            window.Plotly.Fx.hover(targetDiv, [
+                                                                {curveNumber: 0, pointNumber: [xIndex, yIndex]}
+                                                            ]);
+                                                        }
+                                                    }
+                                                }
+                                            } catch(e) {
+                                                console.error('Heatmap hover sync error:', e);
+                                            }
+                                        }
+                                    });
+                                });
+                                
+                                div.on('plotly_unhover', function(eventData) {
+                                    // Clear hover on other heatmap after delay
+                                    setTimeout(() => {
+                                        charts.forEach(({div: targetDiv}) => {
+                                            if (targetDiv !== div) {
+                                                try {
+                                                    if (window.parent && window.parent.Plotly) {
+                                                        window.parent.Plotly.Fx.unhover(targetDiv);
+                                                    } else if (window.Plotly) {
+                                                        window.Plotly.Fx.unhover(targetDiv);
+                                                    }
+                                                } catch(e) {
+                                                    console.error('Heatmap unhover sync error:', e);
+                                                }
+                                            }
+                                        });
+                                    }, 300);
+                                });
+                            });
+                        } else {
+                            setTimeout(setupHeatmapSync, 500);
+                        }
+                    }
+                    
+                    setupHeatmapSync();
+                    setTimeout(setupHeatmapSync, 1000);
+                    setTimeout(setupHeatmapSync, 2000);
+                })();
+                </script>
+                """
+                components.html(heatmap_hover_sync, height=0)
     
     # --- Liquidity Walls Section ---
     with st.container(border=True):
@@ -699,34 +1148,23 @@ if st.session_state['data']:
             """)
         
         if "greeks" in data and data["greeks"]:
-            df_greeks = pd.DataFrame(data["greeks"])
-            expirations = sorted(df_greeks['expiry'].unique())
-            
-            # Convert expiry strings to datetime for parsing
-            df_greeks['expiry_date'] = pd.to_datetime(df_greeks['expiry'])
-            
-            # Date range selection
-            st.markdown("### Select Date Range for Detailed Analysis")
-            
-            # Get all available dates
-            all_dates = sorted(df_greeks['expiry_date'].dt.strftime('%Y-%m-%d').unique())
-            
-            if len(all_dates) > 1:
-                col_date1, col_date2 = st.columns(2)
-                with col_date1:
-                    start_date_idx = st.selectbox("Start Date", range(len(all_dates)), format_func=lambda x: all_dates[x], key="start_date", help=get_tooltip("Start Date"))
-                with col_date2:
-                    end_date_idx = st.selectbox("End Date", range(len(all_dates)), format_func=lambda x: all_dates[x], key="end_date", index=len(all_dates)-1, help=get_tooltip("End Date"))
-                date_range = all_dates[start_date_idx:end_date_idx+1]
+            # Use global filtered data for Liquidity Analysis
+            if selected_range_start and selected_range_end:
+                 df_greeks_liq = df_greeks_global[
+                    (df_greeks_global['expiry_str'] >= selected_range_start) & 
+                    (df_greeks_global['expiry_str'] <= selected_range_end)
+                 ].copy()
             else:
-                date_range = all_dates
+                 df_greeks_liq = df_greeks_global.copy()
             
-            # Ensure date_range is defined and not empty
-            if not date_range:
-                date_range = all_dates[:1] if all_dates else []
+            # Ensure expiry_date column exists (used in downstream logic)
+            df_greeks_liq['expiry_date'] = df_greeks_liq['expiry_dt']
             
-            # Filter df_greeks to selected date range
-            df_range = df_greeks[df_greeks['expiry_date'].dt.strftime('%Y-%m-%d').isin(date_range)].copy()
+            # date_range derived from the filtered data
+            date_range = sorted(df_greeks_liq['expiry_str'].unique())
+            
+            # df_range is the main dataframe used for charts below
+            df_range = df_greeks_liq
             
             # --- Strike-Level Analysis Section ---
             if date_range and len(date_range) > 0:
@@ -741,14 +1179,14 @@ if st.session_state['data']:
             if not df_range.empty and len(date_range) > 1:
                 x_axis_option = st.radio(
                     "X-Axis",
-                    ["Strike Price", "Expiration Date"],
+                    ["Expiration Date", "Strike Price"],
                     horizontal=True,
                     key="x_axis_range_analysis",
                     index=0,
                     help=get_tooltip("X-Axis")
                 )
             else:
-                x_axis_option = "Strike Price"
+                x_axis_option = "Expiration Date"
             
             # Aggregate data based on x-axis selection
             if not df_range.empty:
@@ -849,7 +1287,7 @@ if st.session_state['data']:
                 )
                 if x_axis_option == "Expiration Date":
                     fig_oi.update_layout(xaxis=dict(tickangle=-45))
-                st.plotly_chart(fig_oi, use_container_width=True)
+                st.plotly_chart(fig_oi, use_container_width=True, key="oi-range-chart", on_select="rerun", selection_mode="points")
                 
                 # Volume Chart (full width)
                 st.markdown("**Volume**")
@@ -893,41 +1331,87 @@ if st.session_state['data']:
                 )
                 if x_axis_option == "Expiration Date":
                     fig_vol.update_layout(xaxis=dict(tickangle=-45))
-                st.plotly_chart(fig_vol, use_container_width=True)
+                st.plotly_chart(fig_vol, use_container_width=True, key="vol-range-chart", on_select="rerun", selection_mode="points")
+                
+                # Capture selection events from Liquidity Range Charts (when X-axis is Expiration Date)
+                if x_axis_option == "Expiration Date":
+                    # Check OI chart
+                    if "oi-range-chart" in st.session_state and st.session_state["oi-range-chart"].get("selection", {}).get("points"):
+                        points = st.session_state["oi-range-chart"]["selection"]["points"]
+                        if points:
+                            selected_x = points[0].get("x")
+                            if selected_x:
+                                try:
+                                    clicked_date = pd.to_datetime(selected_x).strftime('%Y-%m-%d')
+                                    if clicked_date in all_dates_str:
+                                        st.session_state['selected_date_from_chart'] = clicked_date
+                                        st.rerun()
+                                except:
+                                    pass
+                    
+                    # Check Volume chart
+                    if "vol-range-chart" in st.session_state and st.session_state["vol-range-chart"].get("selection", {}).get("points"):
+                        points = st.session_state["vol-range-chart"]["selection"]["points"]
+                        if points:
+                            selected_x = points[0].get("x")
+                            if selected_x:
+                                try:
+                                    clicked_date = pd.to_datetime(selected_x).strftime('%Y-%m-%d')
+                                    if clicked_date in all_dates_str:
+                                        st.session_state['selected_date_from_chart'] = clicked_date
+                                        st.rerun()
+                                except:
+                                    pass
+                
+                # Inject sync scripts for range charts
+                sync_script_range = create_xaxis_sync_script(["oi-range-chart", "vol-range-chart"])
+                components.html(sync_script_range, height=0)
+                
+                # Always add hover sync for range charts (direct application like Greeks)
+                hover_sync_range = create_hover_sync_script(["oi-range-chart", "vol-range-chart"])
+                components.html(hover_sync_range, height=0)
             
             # --- Selected Date Drill-Down Section ---
             if not df_range.empty:
                 st.markdown("---")
-                st.markdown("### Strike-Level Analysis for Selected Date")
-                
-                sorted_dates = sorted(date_range)
-                selected_date = st.selectbox(
-                    "Select Expiration Date to View Strike Distribution",
-                    sorted_dates,
-                    key="selected_exp_date_oi",
-                    help=get_tooltip("Selected Date")
-                )
-                
-                # Filter data for selected date
-                selected_date_data = df_range[df_range['expiry_date'].dt.strftime('%Y-%m-%d') == selected_date]
-                
-                if not selected_date_data.empty:
-                    # Aggregate OI by strike for the selected date
-                    calls_oi_by_strike = selected_date_data[selected_date_data['type'] == 'call'].groupby('strike')['openInterest'].sum()
-                    puts_oi_by_strike = selected_date_data[selected_date_data['type'] == 'put'].groupby('strike')['openInterest'].sum()
+                # Date is already selected globally via sidebar
+                # Fallback only if somehow it's None (though sidebar logic should handle this)
+                if 'selected_date' not in locals() or selected_date is None:
+                     if date_range:
+                         selected_date = date_range[0]
+                     else:
+                         selected_date = None
+
+                if selected_date:
+                    st.markdown(f"### Strike-Level Analysis for Selected Date: {selected_date}")
                     
-                    # Get all strikes for this date
-                    all_strikes = sorted(set(list(calls_oi_by_strike.index) + list(puts_oi_by_strike.index)))
+                    # Filter data for selected date
+                    selected_date_data = df_range[df_range['expiry_date'].dt.strftime('%Y-%m-%d') == selected_date]
                     
-                    call_oi_values = [calls_oi_by_strike.get(strike, 0) for strike in all_strikes]
-                    put_oi_values = [puts_oi_by_strike.get(strike, 0) for strike in all_strikes]
-                    
-                    # Aggregate Volume by strike for the selected date
-                    calls_vol_by_strike = selected_date_data[selected_date_data['type'] == 'call'].groupby('strike')['volume'].sum()
-                    puts_vol_by_strike = selected_date_data[selected_date_data['type'] == 'put'].groupby('strike')['volume'].sum()
-                    
-                    call_vol_values = [calls_vol_by_strike.get(strike, 0) for strike in all_strikes]
-                    put_vol_values = [puts_vol_by_strike.get(strike, 0) for strike in all_strikes]
+                    if not selected_date_data.empty:
+                        # Aggregate OI by strike for the selected date
+                        calls_oi_by_strike = selected_date_data[selected_date_data['type'] == 'call'].groupby('strike')['openInterest'].sum()
+                        puts_oi_by_strike = selected_date_data[selected_date_data['type'] == 'put'].groupby('strike')['openInterest'].sum()
+                        
+                        # Get all strikes for this date
+                        all_strikes = sorted(set(list(calls_oi_by_strike.index) + list(puts_oi_by_strike.index)))
+                        
+                        call_oi_values = [calls_oi_by_strike.get(strike, 0) for strike in all_strikes]
+                        put_oi_values = [puts_oi_by_strike.get(strike, 0) for strike in all_strikes]
+                        
+                        # Aggregate Volume by strike for the selected date
+                        calls_vol_by_strike = selected_date_data[selected_date_data['type'] == 'call'].groupby('strike')['volume'].sum()
+                        puts_vol_by_strike = selected_date_data[selected_date_data['type'] == 'put'].groupby('strike')['volume'].sum()
+                        
+                        call_vol_values = [calls_vol_by_strike.get(strike, 0) for strike in all_strikes]
+                        put_vol_values = [puts_vol_by_strike.get(strike, 0) for strike in all_strikes]
+                        
+                        # Define chart keys for synchronization
+                        oi_selected_key = "oi-selected-chart"
+                    vol_selected_key = "vol-selected-chart"
+                    delta_selected_key = "delta-selected-chart"
+                    gamma_selected_key = "gamma-selected-chart"
+                    theta_selected_key = "theta-selected-chart"
                     
                     # Create two charts side by side
                     col_oi, col_vol = st.columns(2)
@@ -972,7 +1456,7 @@ if st.session_state['data']:
                             ),
                             legend=dict(font=dict(color=legend_color))
                         )
-                        st.plotly_chart(fig_oi_by_strike, use_container_width=True)
+                        st.plotly_chart(fig_oi_by_strike, use_container_width=True, key=oi_selected_key)
                     
                     with col_vol:
                         st.markdown("**Volume by Strike**")
@@ -1014,7 +1498,7 @@ if st.session_state['data']:
                             ),
                             legend=dict(font=dict(color=legend_color))
                         )
-                        st.plotly_chart(fig_vol_by_strike, use_container_width=True)
+                        st.plotly_chart(fig_vol_by_strike, use_container_width=True, key=vol_selected_key)
                     
                     # Add Greeks Slice Analysis
                     st.markdown("---")
@@ -1073,7 +1557,7 @@ if st.session_state['data']:
                                 ),
                                 legend=dict(font=dict(color=legend_color))
                             )
-                            st.plotly_chart(fig_delta, use_container_width=True)
+                            st.plotly_chart(fig_delta, use_container_width=True, key=delta_selected_key)
                         with col_g2:
                             fig_gamma = go.Figure(go.Scatter(
                                 x=filtered_df['strike'], 
@@ -1102,7 +1586,7 @@ if st.session_state['data']:
                                 ),
                                 legend=dict(font=dict(color=legend_color))
                             )
-                            st.plotly_chart(fig_gamma, use_container_width=True)
+                            st.plotly_chart(fig_gamma, use_container_width=True, key=gamma_selected_key)
                         with col_g3:
                             fig_theta = go.Figure(go.Bar(
                                 x=filtered_df['strike'], 
@@ -1130,7 +1614,18 @@ if st.session_state['data']:
                                 ),
                                 legend=dict(font=dict(color=legend_color))
                             )
-                            st.plotly_chart(fig_theta, use_container_width=True)
+                            st.plotly_chart(fig_theta, use_container_width=True, key=theta_selected_key)
+                        
+                        # Inject hover sync script for Greeks charts (Delta, Gamma, Theta only)
+                        # And also sync with OI and Volume charts for the selected date
+                        sync_script_greeks = create_hover_sync_script([
+                            oi_selected_key,
+                            vol_selected_key,
+                            delta_selected_key, 
+                            gamma_selected_key, 
+                            theta_selected_key
+                        ])
+                        components.html(sync_script_greeks, height=0)
 
 else:
     st.info("Enter a ticker symbol and click 'Analyze' to begin.")
