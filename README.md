@@ -1,6 +1,6 @@
 # Stock Options Visualization Engine
 
-**Deployed Link:** http://3.17.59.48:8080/
+**Deployed Link:** [http://3.17.59.48:8080/](http://18.118.51.176:8080/)
 
 #### Please clone the repo and run the commands below in separate terminals to open the dashboard locally if the link is down, it is possible that we may have run out of credits!
 
