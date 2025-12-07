@@ -2,3 +2,8 @@
 /venv
 /backend/app/__pycache__
 /backend/app/services/__pycache__
+/.claude
+ecs-task-definition.json
+deployment.md
+deploy.ps1
+/.claude

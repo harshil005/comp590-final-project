@@ -2,7 +2,19 @@
 import os
 import sys
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, List
+from unittest.mock import MagicMock
+
+# --- MONKEY PATCH START ---
+# Hack for Python 3.12 compatibility with py_lets_be_rational
+# This mock must be injected BEFORE py_vollib or py_lets_be_rational is imported
+if "_testcapi" not in sys.modules:
+    mock_testcapi = MagicMock()
+    # Define the constants py_lets_be_rational looks for
+    mock_testcapi.DBL_MAX = 1.7976931348623157e+308
+    mock_testcapi.DBL_MIN = 2.2250738585072014e-308
+    sys.modules["_testcapi"] = mock_testcapi
+# --- MONKEY PATCH END ---
 
 # external
 import logging
@@ -10,10 +22,12 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from scipy.stats import norm
+from scipy.interpolate import griddata
+import yfinance as yf
+from py_vollib_vectorized import get_all_greeks
 
 # --- LOGGING SETUP ---
 # This ensures you see ALL errors in your terminal
@@ -27,7 +41,230 @@ logger = logging.getLogger(__name__)
 # Verify logger is working
 logger.info("Application starting... Logging enabled.")
 
-# internal
+# --- INLINED BACKEND SERVICES ---
+# All backend logic is now directly in this file for single-file deployment
+
+def get_ticker_data(ticker_symbol: str) -> yf.Ticker:
+    """Creates a yfinance Ticker object for the given symbol."""
+    return yf.Ticker(ticker_symbol)
+
+def clean_options_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Removes invalid option contracts that would cause calculation errors."""
+    if df.empty:
+        return df
+    if 'bid' in df.columns:
+        df = df[df['bid'] > 0]
+    if 'impliedVolatility' in df.columns:
+        df = df[df['impliedVolatility'] > 0]
+    return df
+
+def get_options_chain(ticker: yf.Ticker) -> dict:
+    """Fetches and cleans options chains for all available expiration dates."""
+    expirations = ticker.options
+    chain = {}
+    
+    class OptionChain:
+        def __init__(self, calls, puts):
+            self.calls = calls
+            self.puts = puts
+    
+    for expiration in expirations:
+        try:
+            options = ticker.option_chain(expiration)
+            cleaned_calls = clean_options_data(options.calls)
+            cleaned_puts = clean_options_data(options.puts)
+            chain[expiration] = OptionChain(cleaned_calls, cleaned_puts)
+        except Exception as e:
+            logger.warning(f"Error fetching chain for {expiration}: {e}")
+            continue
+    return chain
+
+def prepare_volatility_surface_data(options_chain: dict, underlying_price: Optional[float] = None) -> Dict:
+    """Prepares volatility surface data with Greeks for visualization and analysis."""
+    strikes = []
+    times = []
+    ivs = []
+    greeks_data = []
+    
+    today = datetime.now()
+    risk_free_rate = 0.045  # Approximate risk free rate (4.5%)
+
+    for expiration_str, chain in options_chain.items():
+        expiration_date = datetime.strptime(expiration_str, '%Y-%m-%d')
+        days_to_expiry = (expiration_date - today).days
+        
+        if days_to_expiry < 1:
+            continue
+        
+        T = days_to_expiry / 365.0
+        
+        for opt_type, df in [('call', chain.calls), ('put', chain.puts)]:
+            if df.empty:
+                continue
+            
+            if 'impliedVolatility' in df.columns:
+                df = df[df['impliedVolatility'] > 0]
+            
+            if underlying_price and not df.empty:
+                flag = 'c' if opt_type == 'call' else 'p'
+                
+                try:
+                    greeks_df = get_all_greeks(
+                        flag, 
+                        float(underlying_price), 
+                        df['strike'].values, 
+                        T, 
+                        risk_free_rate, 
+                        df['impliedVolatility'].values,
+                        model='black_scholes'
+                    )
+                    
+                    # Vanna: dDelta/dSigma
+                    bump_vol = 0.01
+                    greeks_vol_plus = get_all_greeks(
+                        flag, 
+                        float(underlying_price), 
+                        df['strike'].values, 
+                        T, 
+                        risk_free_rate, 
+                        df['impliedVolatility'].values + bump_vol,
+                        model='black_scholes'
+                    )
+                    greeks_df['vanna'] = (greeks_vol_plus['delta'] - greeks_df['delta']) / bump_vol
+
+                    # Charm: -dDelta/dTime
+                    bump_time = 1.0/365.0
+                    T_new = np.maximum(1e-5, T - bump_time)
+                    
+                    greeks_time_minus = get_all_greeks(
+                        flag, 
+                        float(underlying_price), 
+                        df['strike'].values, 
+                        T_new, 
+                        risk_free_rate, 
+                        df['impliedVolatility'].values,
+                        model='black_scholes'
+                    )
+                    greeks_df['charm'] = greeks_df['delta'] - greeks_time_minus['delta']
+                    
+                    greeks_df['strike'] = df['strike']
+                    greeks_df['iv'] = df['impliedVolatility']
+                    greeks_df['expiry'] = expiration_str
+                    greeks_df['days_to_expiry'] = days_to_expiry
+                    greeks_df['type'] = opt_type
+                    greeks_df['openInterest'] = df['openInterest'] if 'openInterest' in df.columns else 0
+                    greeks_df['volume'] = df['volume'] if 'volume' in df.columns else 0
+                    
+                    current_records = greeks_df[['strike', 'expiry', 'days_to_expiry', 'type', 'iv', 'delta', 'gamma', 'theta', 'vega', 'vanna', 'charm', 'openInterest', 'volume']].fillna(0).to_dict('records')
+                    greeks_data.extend(current_records)
+                    
+                    strikes.extend(df['strike'].tolist())
+                    times.extend([days_to_expiry] * len(df))
+                    ivs.extend(df['impliedVolatility'].fillna(0).tolist())
+                    
+                except Exception as e:
+                    logger.warning(f"Error calculating greeks for {expiration_str}: {e}")
+                    pass
+            else:
+                strikes.extend(df['strike'].tolist())
+                times.extend([days_to_expiry] * len(df))
+                ivs.extend(df['impliedVolatility'].fillna(0).tolist())
+
+    if not strikes:
+        return {}
+
+    # Interpolation
+    grid_x, grid_y = np.mgrid[
+        min(strikes):max(strikes):100j, 
+        min(times):max(times):100j
+    ]
+
+    grid_z = griddata(
+        (strikes, times), 
+        ivs, 
+        (grid_x, grid_y), 
+        method='cubic'
+    )
+    
+    grid_z = np.maximum(grid_z, 0)
+
+    return {
+        "raw_x": strikes,
+        "raw_y": times,
+        "raw_z": ivs,
+        "mesh_x": grid_x.tolist(),
+        "mesh_y": grid_y.tolist(),
+        "mesh_z": np.nan_to_num(grid_z).tolist(),
+        "greeks": greeks_data
+    }
+
+def get_volatility_surface_data(ticker_symbol: str) -> dict:
+    """Fetches volatility surface data directly."""
+    ticker = get_ticker_data(ticker_symbol)
+    try:
+        hist = ticker.history(period="1d")
+        current_price = hist['Close'].iloc[-1] if not hist.empty else None
+    except:
+        current_price = None
+        
+    options_chain = get_options_chain(ticker)
+    surface_data = prepare_volatility_surface_data(options_chain, current_price)
+    
+    if not surface_data:
+        raise Exception("No volatility surface data available for this ticker")
+    
+    return surface_data
+
+def get_open_interest_data(ticker_symbol: str, expiration_date: Optional[str] = None) -> dict:
+    """Fetches open interest data directly."""
+    ticker = get_ticker_data(ticker_symbol)
+    expirations = ticker.options
+    if not expirations:
+        raise Exception("No options expirations found for this ticker")
+    
+    target_expiration = expiration_date if expiration_date in expirations else expirations[0]
+    options = ticker.option_chain(target_expiration)
+    
+    calls = options.calls[['strike', 'openInterest', 'volume', 'impliedVolatility']].rename(
+        columns={'openInterest': 'callOpenInterest', 'volume': 'callVolume'}
+    )
+    puts = options.puts[['strike', 'openInterest', 'volume', 'impliedVolatility']].rename(
+        columns={'openInterest': 'putOpenInterest', 'volume': 'putVolume'}
+    )
+    
+    merged_data = pd.merge(calls, puts, on="strike", how="outer").fillna(0)
+    
+    total_call_vol = merged_data['callVolume'].sum()
+    total_put_vol = merged_data['putVolume'].sum()
+    pcr = total_put_vol / total_call_vol if total_call_vol > 0 else 0
+    
+    all_ivs = pd.concat([calls['impliedVolatility'], puts['impliedVolatility']])
+    all_ivs = all_ivs[all_ivs > 0]
+    avg_iv = all_ivs.mean() if not all_ivs.empty else 0
+    
+    summary = {
+        "putCallRatio": round(pcr, 2),
+        "averageIV": round(avg_iv, 4),
+        "totalVolume": int(total_call_vol + total_put_vol),
+        "targetExpiration": target_expiration,
+        "availableExpirations": list(expirations)
+    }
+    
+    return {"data": merged_data.to_dict(orient='records'), "summary": summary}
+
+def get_historical_price_data(ticker_symbol: str) -> dict:
+    """Fetches historical price data directly."""
+    ticker = get_ticker_data(ticker_symbol)
+    hist_data = ticker.history(period="90d")
+    
+    if hist_data.empty:
+        raise Exception("Could not fetch historical price data")
+        
+    hist_data = hist_data[['Close']].reset_index()
+    hist_data.columns = ['date', 'price']
+    hist_data['date'] = hist_data['date'].dt.strftime('%Y-%m-%d')
+    
+    return {"data": hist_data.to_dict(orient='records')}
 
 # --- COLOR SCHEME HELPER FUNCTIONS ---
 def get_call_color(is_color_blind: bool) -> str:
@@ -288,9 +525,6 @@ def generate_probability_cone_data(spot_price: float, current_iv: float, start_d
 # Set page config first - this must be the first Streamlit command
 st.set_page_config(page_title="Options Viz", layout="wide")
 
-# Get API URL
-API_URL = os.getenv("API_URL", "http://localhost:8000/api/v1")
-
 # Display title immediately
 st.title("Stock Options Visualization Engine")
 
@@ -378,32 +612,25 @@ analyze_btn = st.sidebar.button("Analyze")
 if analyze_btn:
     with st.spinner(f"Fetching data for {ticker}..."):
         try:
-            # Fetch Volatility Surface & Greeks
-            response = requests.get(f"{API_URL}/ticker/{ticker}/volatility-surface")
-            if response.status_code == 200:
-                st.session_state['data'] = response.json()
-            else:
-                st.error(f"Failed to fetch volatility data. Status: {response.status_code}")
+            # Fetch Volatility Surface & Greeks (direct function call)
+            st.session_state['data'] = get_volatility_surface_data(ticker)
             
-            # Fetch Open Interest & Summary
-            resp_oi = requests.get(f"{API_URL}/ticker/{ticker}/open-interest")
-            if resp_oi.status_code == 200:
-                oi_json = resp_oi.json()
-                st.session_state['oi_data'] = pd.DataFrame(oi_json['data'])
-                st.session_state['summary'] = oi_json.get('summary')
+            # Fetch Open Interest & Summary (direct function call)
+            oi_json = get_open_interest_data(ticker)
+            st.session_state['oi_data'] = pd.DataFrame(oi_json['data'])
+            st.session_state['summary'] = oi_json.get('summary')
 
             # Always fetch SPY comparison data
-            resp_spy = requests.get(f"{API_URL}/ticker/SPY/open-interest")
-            if resp_spy.status_code == 200:
-                st.session_state['spy_summary'] = resp_spy.json().get('summary')
-            else:
+            try:
+                spy_json = get_open_interest_data("SPY")
+                st.session_state['spy_summary'] = spy_json.get('summary')
+            except Exception as e:
+                logger.warning(f"Failed to fetch SPY data: {e}")
                 st.session_state['spy_summary'] = None
 
-            # Fetch Historical Price Data
-            resp_hist = requests.get(f"{API_URL}/ticker/{ticker}/historical-price")
-            if resp_hist.status_code == 200:
-                hist_json = resp_hist.json()
-                st.session_state['historical_price'] = pd.DataFrame(hist_json.get('data', hist_json))
+            # Fetch Historical Price Data (direct function call)
+            hist_json = get_historical_price_data(ticker)
+            st.session_state['historical_price'] = pd.DataFrame(hist_json.get('data', hist_json))
             
             # Reset filters when new data is loaded
             if "selected_range_from_state" in st.session_state:
@@ -412,7 +639,8 @@ if analyze_btn:
                 del st.session_state["selected_date_from_chart"]
                 
         except Exception as e:
-            st.error(f"Error connecting to backend: {e}")
+            st.error(f"Error fetching data: {e}")
+            logger.error(f"Error details: {e}", exc_info=True)
 
 # --- MAIN CONTENT ---
 if st.session_state['data']:
